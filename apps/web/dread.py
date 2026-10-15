@@ -1,0 +1,327 @@
+import streamlit as st
+
+from stride_gpt.core.dread import generate_dread_assessment
+from stride_gpt.core.schemas import LLMConfig
+
+
+def dread_json_to_markdown(dread_assessment):
+    # Create a clean Markdown table with proper spacing
+    markdown_output = "| 威胁类型 | 攻击场景 | 潜在损害 | 可复现性 | 可利用性 | 受影响用户 | 可发现性 | 风险评分 |"
+    markdown_output += "|------------|----------|------------------|-----------------|----------------|----------------|-----------------|------------|\n"
+
+    try:
+        # Access the list of threats under the "Risk Assessment" key
+        threats = dread_assessment.get("Risk Assessment", [])
+
+        # If there are no threats, add a message row
+        if not threats:
+            markdown_output += "| 未发现威胁 | 请先生成威胁模型 | - | - | - | - | - | - |"
+            return markdown_output
+
+        for threat in threats:
+            # Check if threat is a dictionary
+            if isinstance(threat, dict):
+                # Get values with defaults
+                threat_type = threat.get("Threat Type", "N/A")
+                scenario = threat.get("Scenario", "N/A")
+                damage_potential = threat.get("Damage Potential", 0)
+                reproducibility = threat.get("Reproducibility", 0)
+                exploitability = threat.get("Exploitability", 0)
+                affected_users = threat.get("Affected Users", 0)
+                discoverability = threat.get("Discoverability", 0)
+
+                # Calculate the Risk Score
+                risk_score = (
+                    damage_potential
+                    + reproducibility
+                    + exploitability
+                    + affected_users
+                    + discoverability
+                ) / 5
+
+                # Escape any pipe characters in text fields to prevent table formatting issues
+                threat_type = str(threat_type).replace("|", "\\|")
+                scenario = str(scenario).replace("|", "\\|")
+
+                # Ensure scenario text doesn't break table formatting by removing newlines
+                scenario = scenario.replace("\n", " ").replace("\r", "")
+
+                # Add the row to the table with proper formatting
+                markdown_output += f"| {threat_type} | {scenario} | {damage_potential} | {reproducibility} | {exploitability} | {affected_users} | {discoverability} | {risk_score:.2f} |\n"
+            else:
+                # Skip non-dictionary entries and log a warning
+                markdown_output += "| 无效威胁 | 威胁数据格式不正确 | - | - | - | - | - | - |"
+    except Exception:
+        # Add a note about the error and a placeholder row
+        markdown_output += "| 错误 | 处理 DREAD 评估时发生错误 | - | - | - | - | - | - |"
+
+    # Add a blank line after the table for better rendering
+    markdown_output += "\n"
+    return markdown_output
+
+
+def clean_json_response(response_text):
+    import re
+
+    # Remove markdown JSON code block if present
+    json_pattern = r"```json\s*(.*?)\s*```"
+    match = re.search(json_pattern, response_text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    # If no JSON code block, try to find content between any code blocks
+    code_pattern = r"```\s*(.*?)\s*```"
+    match = re.search(code_pattern, response_text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    # If no code blocks, return the original text
+    return response_text.strip()
+
+
+# Function to create a prompt to generate DREAD risk assessment
+def create_dread_assessment_prompt(threats, is_genai=False, is_agentic=False):
+    prompt = """Act as a cyber security expert with more than 20 years of experience in threat modeling using STRIDE and DREAD methodologies.
+Your task is to produce a DREAD risk assessment for the threats identified in a threat model.
+
+"""
+
+    if is_genai or is_agentic:
+        prompt += """LLM/GENERATIVE AI DREAD SCORING CONSIDERATIONS:
+When scoring threats for LLM/generative AI applications, consider these factors:
+
+DAMAGE POTENTIAL:
+- Prompt injection can lead to complete system compromise or data exfiltration
+- Training data poisoning affects all users and persists across model updates
+- Sensitive data disclosure may include PII, credentials, or proprietary information
+- Malicious output generation can cause reputational damage and legal liability
+
+REPRODUCIBILITY:
+- Prompt injection success varies with model, temperature, and context
+- Some attacks require specific phrasing or multi-turn conversations
+- RAG poisoning may need time for embeddings to propagate
+- Model behavior can be non-deterministic, making exact reproduction difficult
+
+EXPLOITABILITY:
+- Prompt injection requires minimal technical skill
+- Supply chain attacks on models/plugins require access to trusted sources
+- Training data poisoning may need access to fine-tuning pipelines
+- Some attacks are as simple as crafting malicious user input
+
+AFFECTED USERS:
+- Model-level vulnerabilities affect all users of that model instance
+- RAG/knowledge base poisoning impacts everyone querying that data
+- Per-user context isolation failures can expose cross-user data
+- Shared prompt templates multiply the blast radius
+
+DISCOVERABILITY:
+- Basic prompt injection is easily discoverable through experimentation
+- System prompt extraction is often trivial with creative prompting
+- Training data can sometimes be extracted through careful probing
+- Model capabilities and limitations are often documented or enumerable
+
+"""
+
+    if is_agentic:
+        prompt += """AGENTIC AI DREAD SCORING CONSIDERATIONS:
+When scoring threats for agentic AI applications, consider these factors:
+
+DAMAGE POTENTIAL:
+- Consider cascading effects across agent chains and downstream systems
+- Memory/context poisoning can affect all future sessions and users
+- Credential exfiltration may grant persistent access to multiple systems
+- Autonomous actions may cause irreversible damage before detection
+- Multi-agent compromises can have exponential blast radius
+- Infrastructure-level attacks (sandbox escape, container breakout) enable lateral movement
+
+REPRODUCIBILITY:
+- Agent behaviors may be probabilistic and context-dependent
+- Prompt injection success depends on specific input formatting and model state
+- Memory poisoning effects may manifest inconsistently across sessions
+- Multi-step attacks through agent chains may be harder to reproduce exactly
+- RAG-based attacks depend on embedding similarity and retrieval ranking
+- Tool exploitation may require specific parameter combinations
+
+EXPLOITABILITY:
+- Prompt injection attacks require low technical skill but specific knowledge of agent behavior
+- Tool misuse often exploits configuration gaps rather than code vulnerabilities
+- Supply chain attacks (malicious MCP servers) require access to trusted repositories
+- Context poisoning may require patience but little technical sophistication
+- Code execution exploits vary: simple prompt tricks vs. advanced sandbox escapes
+- Multi-agent attacks may require understanding of agent communication protocols
+
+AFFECTED USERS:
+- Multi-agent systems can amplify impact across all connected agents and their users
+- Shared memory/RAG databases affect all users of that knowledge base
+- Credential abuse may affect all systems accessible with those credentials
+- Agent-to-agent communication attacks can cascade across entire agent ecosystems
+- Foundation model compromises affect every application using that model
+- Infrastructure attacks may impact all tenants in shared environments
+
+DISCOVERABILITY:
+- Prompt injection vulnerabilities are easily discoverable through normal interaction
+- Agent decision logs may reveal exploitable patterns and tool permissions
+- Tool permissions and capabilities are often documented or easily enumerated
+- Memory contents may leak through carefully crafted queries
+- Framework vulnerabilities are often published in CVE databases
+- Agent behavior patterns can be profiled through systematic probing
+
+ARCHITECTURAL PATTERN-SPECIFIC SCORING ADJUSTMENTS:
+When analyzing threats, adjust DREAD scores based on detected patterns:
+
+FOR RAG/RETRIEVAL SYSTEMS:
+- Damage Potential: +1-2 if RAG serves multiple users (poisoning affects everyone)
+- Reproducibility: -1 if retrieval is non-deterministic (harder to reproduce exactly)
+- Affected Users: +2-3 if shared knowledge base across users/tenants
+- Discoverability: +1 if document upload is user-accessible (easy to test poisoning)
+
+FOR MULTI-AGENT SYSTEMS:
+- Damage Potential: +2-3 for cascading/amplification effects across agent chains
+- Reproducibility: -1-2 for complex multi-agent interactions (harder to reproduce)
+- Affected Users: +2 for ecosystem-wide attacks affecting all connected agents
+- Discoverability: +1 if agent communication patterns are observable
+
+FOR CODE EXECUTION ENVIRONMENTS:
+- Damage Potential: +3 if sandbox escape is possible (full system compromise)
+- Exploitability: Variable based on sandbox strength (-2 for strong isolation, +2 for weak)
+- Affected Users: +2-3 if shared infrastructure (affects co-tenants)
+- Discoverability: -1 for sophisticated sandbox escapes (requires expertise to find)
+
+FOR TOOL/MCP ECOSYSTEMS:
+- Damage Potential: +1-2 based on tool permissions (higher for write/execute tools)
+- Reproducibility: +1 if tool behavior is deterministic
+- Exploitability: +2 if tools accept unvalidated parameters
+- Discoverability: +2 if tool list and capabilities are enumerable
+
+FOR PERSISTENT MEMORY SYSTEMS:
+- Damage Potential: +2 if memory affects future sessions (persistent compromise)
+- Reproducibility: -1 if memory retrieval is similarity-based (less predictable)
+- Affected Users: +2-3 if memory is shared across users
+- Discoverability: +1 if memory contents can be queried directly
+
+FOR AUTONOMOUS OPERATIONS:
+- Damage Potential: +2-3 if actions are irreversible before human review
+- Exploitability: +1 if human oversight is minimal or can be bypassed
+- Affected Users: Based on scope of autonomous actions
+- Discoverability: -1 if attack occurs during low-monitoring periods
+
+CROSS-LAYER THREAT SCORING:
+For threats that span multiple architectural components, consider cumulative risk:
+- If a threat enables follow-on attacks, score Damage Potential for the full attack chain
+- If exploitation requires multiple steps across components, adjust Reproducibility accordingly
+- If compromise propagates to shared infrastructure, increase Affected Users significantly
+
+"""
+
+    prompt += f"""Below is the list of identified threats:
+{threats}
+
+When providing the risk assessment, use a JSON formatted response with a top-level key "Risk Assessment" and a list of threats, each with the following sub-keys:
+- "Threat Type": A string representing the type of threat (e.g., "Spoofing").
+- "Scenario": A string describing the threat scenario.
+- "Damage Potential": An integer between 1 and 10.
+- "Reproducibility": An integer between 1 and 10.
+- "Exploitability": An integer between 1 and 10.
+- "Affected Users": An integer between 1 and 10.
+- "Discoverability": An integer between 1 and 10.
+
+Assign a value between 1 and 10 for each sub-key based on the DREAD methodology. Use the following scale:
+- 1-3: Low
+- 4-6: Medium
+- 7-10: High
+
+Ensure the JSON response is correctly formatted and does not contain any additional text. Here is an example of the expected JSON response format:
+{{
+  "Risk Assessment": [
+    {{
+      "Threat Type": "Spoofing",
+      "Scenario": "An attacker could create a fake OAuth2 provider and trick users into logging in through it.",
+      "Damage Potential": 8,
+      "Reproducibility": 6,
+      "Exploitability": 5,
+      "Affected Users": 9,
+      "Discoverability": 7
+    }},
+    {{
+      "Threat Type": "Spoofing",
+      "Scenario": "An attacker could intercept the OAuth2 token exchange process through a Man-in-the-Middle (MitM) attack.",
+      "Damage Potential": 8,
+      "Reproducibility": 7,
+      "Exploitability": 6,
+      "Affected Users": 8,
+      "Discoverability": 6
+    }}
+  ]
+}}
+"""
+    prompt += (
+        "\n\nIMPORTANT: Write all human-readable output (scenarios, impacts, "
+        "descriptions, recommendations, labels, and table cell content) in "
+        "Simplified Chinese (简体中文). Keep JSON keys, schema field names, "
+        "STRIDE category names, OWASP/ASI/MITRE codes, product names, model "
+        "identifiers, and code identifiers in English."
+    )
+    return prompt
+
+
+def get_dread_assessment(api_key, model_name, prompt):
+    config = LLMConfig(provider="OpenAI API", model_name=model_name, api_key=api_key)
+    parsed, _response = generate_dread_assessment(config, prompt)
+    return parsed
+
+
+# Function to get DREAD risk assessment from the Google model's response.
+def get_dread_assessment_google(google_api_key, google_model, prompt):
+    config = LLMConfig(provider="Google AI API", model_name=google_model, api_key=google_api_key)
+    parsed, response = generate_dread_assessment(config, prompt)
+    if response.thinking:
+        st.session_state["last_thinking_content"] = response.thinking
+    return parsed
+
+
+# Function to get DREAD risk assessment from the Mistral model's response.
+def get_dread_assessment_mistral(mistral_api_key, mistral_model, prompt):
+    config = LLMConfig(provider="Mistral API", model_name=mistral_model, api_key=mistral_api_key)
+    parsed, _response = generate_dread_assessment(config, prompt)
+    return parsed
+
+
+# Function to get DREAD risk assessment from the DeepSeek model's response.
+def get_dread_assessment_deepseek(deepseek_api_key, deepseek_model, prompt):
+    config = LLMConfig(provider="DeepSeek API", model_name=deepseek_model, api_key=deepseek_api_key)
+    parsed, _response = generate_dread_assessment(config, prompt)
+    return parsed
+
+
+# Function to get DREAD risk assessment from the Anthropic model's response.
+def get_dread_assessment_anthropic(anthropic_api_key, anthropic_model, prompt):
+    config = LLMConfig(
+        provider="Anthropic API",
+        model_name=anthropic_model,
+        api_key=anthropic_api_key,
+        use_thinking=st.session_state.get("use_thinking", False),
+    )
+    parsed, response = generate_dread_assessment(config, prompt)
+    if response.thinking:
+        st.session_state["last_thinking_content"] = response.thinking
+    return parsed
+
+
+# Function to get DREAD risk assessment from LM Studio Server response.
+def get_dread_assessment_lm_studio(lm_studio_endpoint, model_name, prompt, api_key="not-needed"):
+    config = LLMConfig(
+        provider="LM Studio Server",
+        model_name=model_name,
+        api_key=api_key,
+        api_base=lm_studio_endpoint,
+    )
+    parsed, _response = generate_dread_assessment(config, prompt)
+    return parsed
+
+
+# Function to get DREAD risk assessment from the Groq model's response.
+def get_dread_assessment_groq(groq_api_key, groq_model, prompt):
+    config = LLMConfig(provider="Groq API", model_name=groq_model, api_key=groq_api_key)
+    parsed, response = generate_dread_assessment(config, prompt)
+    if response.reasoning:
+        with st.expander("View model's reasoning process", expanded=False):
+            st.write(response.reasoning)
+    return parsed

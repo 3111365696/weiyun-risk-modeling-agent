@@ -1,0 +1,1278 @@
+"""Tests for stride_gpt.agent.report — markdown, JSON, and SARIF rendering."""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC
+from pathlib import Path
+
+import pytest
+
+from stride_gpt.agent.html_report import render_html, render_html_from_json
+from stride_gpt.agent.report import (
+    list_reports,
+    load_report,
+    render_json,
+    render_markdown,
+    render_markdown_from_json,
+    render_sarif,
+    render_sarif_from_json,
+    save_quick_report,
+    save_report,
+)
+from stride_gpt.core.schemas import (
+    AnalysisReport,
+    SubsystemFinding,
+    ThreatModelOutput,
+)
+
+# ---------------------------------------------------------------------------
+# render_markdown
+# ---------------------------------------------------------------------------
+
+
+class TestRenderMarkdown:
+    def test_contains_title(self, sample_report: AnalysisReport):
+        md = render_markdown(sample_report)
+        assert "# STRIDE Threat Model:" in md
+
+    def test_contains_threats_table(self, sample_report: AnalysisReport):
+        md = render_markdown(sample_report)
+        assert "| Threat Type |" in md
+        assert "Spoofing" in md
+        assert "brute-force" in md
+
+    def test_contains_cross_cutting(self, sample_report: AnalysisReport):
+        md = render_markdown(sample_report)
+        assert "Cross-Cutting Threats" in md
+        assert "CSRF" in md
+
+    def test_contains_recommendations(self, sample_report: AnalysisReport):
+        md = render_markdown(sample_report)
+        assert "rate limiting" in md
+
+    def test_contains_summary(self, sample_report: AnalysisReport):
+        md = render_markdown(sample_report)
+        assert "Total threats identified" in md
+        assert "LLM calls" in md
+
+    def test_pipe_escaping(self, sample_plan):
+        """Pipes in threat text shouldn't break markdown tables."""
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        finding = SubsystemFinding(
+            subsystem="Test",
+            threats=[{
+                "Threat Type": "Tampering",
+                "Scenario": "Input contains | pipe chars",
+                "Potential Impact": "Table | breaks",
+            }],
+        )
+        report = AnalysisReport(plan=sample_plan, findings=[finding], metadata={})
+        md = render_markdown(report)
+        assert "\\|" in md
+
+
+# ---------------------------------------------------------------------------
+# render_json
+# ---------------------------------------------------------------------------
+
+
+class TestRenderJson:
+    def test_structure(self, sample_report: AnalysisReport):
+        data = render_json(sample_report)
+        assert data["version"] == "1.0"
+        assert "generated_at" in data
+        assert len(data["subsystems"]) == 1
+        assert len(data["cross_cutting_threats"]) == 1
+
+    def test_metadata_preserved(self, sample_report: AnalysisReport):
+        data = render_json(sample_report)
+        assert data["metadata"]["llm_calls"] == 5
+
+
+# ---------------------------------------------------------------------------
+# render_sarif
+# ---------------------------------------------------------------------------
+
+
+class TestRenderSarif:
+    def test_sarif_schema(self, sample_report: AnalysisReport):
+        sarif = render_sarif(sample_report)
+        assert sarif["version"] == "2.1.0"
+        assert "$schema" in sarif
+        assert len(sarif["runs"]) == 1
+
+    def test_sarif_rules(self, sample_report: AnalysisReport):
+        sarif = render_sarif(sample_report)
+        rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+        rule_ids = {r["id"] for r in rules}
+        assert "STRIDE/SPOOFING" in rule_ids
+
+    def test_sarif_results(self, sample_report: AnalysisReport):
+        sarif = render_sarif(sample_report)
+        results = sarif["runs"][0]["results"]
+        # 2 subsystem threats + 1 cross-cutting
+        assert len(results) == 3
+
+    def test_sarif_driver_version_is_configurable(self, monkeypatch, sample_report: AnalysisReport):
+        monkeypatch.setattr(
+            "stride_gpt.agent.report._get_stride_gpt_version",
+            lambda: "9.9.9",
+        )
+        sarif = render_sarif(sample_report)
+        assert sarif["runs"][0]["tool"]["driver"]["version"] == "9.9.9"
+
+    def test_sarif_locations(self, sample_report: AnalysisReport):
+        sarif = render_sarif(sample_report)
+        results = sarif["runs"][0]["results"]
+        subsystem_results = [r for r in results if r["properties"]["subsystem"] != "cross-cutting"]
+        for r in subsystem_results:
+            assert "locations" in r
+
+    def test_cross_cutting_marked(self, sample_report: AnalysisReport):
+        sarif = render_sarif(sample_report)
+        results = sarif["runs"][0]["results"]
+        cc = [r for r in results if r["properties"]["subsystem"] == "cross-cutting"]
+        assert len(cc) == 1
+        assert "[Cross-cutting]" in cc[0]["message"]["text"]
+
+
+# ---------------------------------------------------------------------------
+# render_*_from_json (round-trip)
+# ---------------------------------------------------------------------------
+
+
+class TestOutcomeReporting:
+    """A crashed or skipped subsystem must not read as a clean one."""
+
+    def _report(self, sample_plan, findings) -> AnalysisReport:
+        return AnalysisReport(plan=sample_plan, findings=findings, metadata={})
+
+    def test_markdown_explains_a_failed_subsystem(self, sample_plan):
+        report = self._report(sample_plan, [
+            SubsystemFinding(
+                subsystem="Auth", threats=[], outcome="error",
+                error_class="context_overflow",
+            ),
+        ])
+
+        md = render_markdown(report)
+
+        assert "> **Status**: error" in md
+        assert "context window was exceeded" in md
+        assert "- **Subsystems analyzed**: 0/1" in md
+        assert "- **Not analyzed**: 1 error" in md
+
+    def test_markdown_explains_a_skipped_subsystem(self, sample_plan):
+        report = self._report(sample_plan, [
+            SubsystemFinding(subsystem="Auth", threats=[]),
+            SubsystemFinding(subsystem="API", threats=[], outcome="skipped"),
+        ])
+
+        md = render_markdown(report)
+
+        assert "> **Status**: skipped" in md
+        assert "- **Subsystems analyzed**: 1/2" in md
+
+    def test_markdown_says_nothing_extra_when_every_subsystem_completed(
+        self, sample_report: AnalysisReport
+    ):
+        md = render_markdown(sample_report)
+
+        assert "> **Status**" not in md
+        assert "- **Not analyzed**" not in md
+
+    def test_html_badges_a_failed_subsystem(self, sample_plan):
+        report = self._report(sample_plan, [
+            SubsystemFinding(
+                subsystem="Auth", threats=[], outcome="error",
+                error_class="rate_limited",
+            ),
+        ])
+
+        html = render_html(report)
+
+        assert "rate-limited the run" in html
+        # A failed subsystem has no threats, but saying so would be a lie.
+        assert "No threats identified." not in html
+
+    def test_html_still_says_no_threats_for_a_clean_subsystem(self, sample_plan):
+        report = self._report(sample_plan, [
+            SubsystemFinding(subsystem="Auth", threats=[]),
+        ])
+
+        assert "No threats identified." in render_html(report)
+
+    def test_the_outcome_survives_the_json_round_trip(self, sample_plan):
+        report = self._report(sample_plan, [
+            SubsystemFinding(
+                subsystem="Auth", threats=[], outcome="error", error_class="auth",
+            ),
+        ])
+
+        data = render_json(report)
+
+        assert data["subsystems"][0]["outcome"] == "error"
+        assert data["subsystems"][0]["error_class"] == "auth"
+        assert "> **Status**: error" in render_markdown_from_json(data)
+
+    def test_a_report_saved_before_outcomes_existed_renders_unchanged(self):
+        """No outcome key means the subsystem was analysed."""
+        data = {
+            "target": "app",
+            "overview": "",
+            "subsystems": [
+                {
+                    "name": "Auth",
+                    "threats": [],
+                    "improvement_suggestions": [],
+                    "files_analyzed": [],
+                }
+            ],
+            "cross_cutting_threats": [],
+            "metadata": {},
+        }
+
+        md = render_markdown_from_json(data)
+
+        assert "> **Status**" not in md
+        assert "- **Subsystems analyzed**: 1/1" in md
+        assert "No threats identified." in render_html_from_json(data)
+
+
+class TestFromJsonRenderers:
+    def test_markdown_roundtrip(self, sample_report: AnalysisReport):
+        data = render_json(sample_report)
+        md = render_markdown_from_json(data)
+        assert "Spoofing" in md
+        assert "Cross-Cutting" in md
+
+    def test_sarif_roundtrip(self, sample_report: AnalysisReport):
+        data = render_json(sample_report)
+        sarif = render_sarif_from_json(data)
+        assert sarif["version"] == "2.1.0"
+        assert len(sarif["runs"][0]["results"]) == 3
+
+    def test_sarif_live_and_saved_render_identically(self, sample_report: AnalysisReport):
+        """render_sarif delegates, so the two paths can never drift again.
+
+        They were separate near-identical implementations and had already
+        diverged on ``helpUri``.
+        """
+        assert render_sarif(sample_report) == render_sarif_from_json(
+            render_json(sample_report)
+        )
+
+    def test_sarif_from_json_driver_version_is_configurable(
+        self, monkeypatch, sample_report: AnalysisReport
+    ):
+        monkeypatch.setattr(
+            "stride_gpt.agent.report._get_stride_gpt_version",
+            lambda: "7.7.7",
+        )
+        data = render_json(sample_report)
+        sarif = render_sarif_from_json(data)
+        assert sarif["runs"][0]["tool"]["driver"]["version"] == "7.7.7"
+
+
+# ---------------------------------------------------------------------------
+# save / load / list reports
+# ---------------------------------------------------------------------------
+
+
+class TestReportPersistence:
+    def test_save_and_load(self, sample_report: AnalysisReport, tmp_path: Path):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("stride_gpt.config.REPORTS_DIR", tmp_path)
+            path = save_report(sample_report)
+            assert path.exists()
+            data = load_report(path)
+            assert data["version"] == "1.0"
+            assert len(data["subsystems"]) == 1
+
+    def test_list_reports(self, sample_report: AnalysisReport, tmp_path: Path):
+        from datetime import datetime
+        from unittest.mock import patch
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("stride_gpt.config.REPORTS_DIR", tmp_path)
+
+            # Use different timestamps so filenames don't collide
+            t1 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+            t2 = datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
+            with patch("stride_gpt.agent.report.datetime") as mock_dt:
+                mock_dt.now.return_value = t1
+                mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+                save_report(sample_report)
+                mock_dt.now.return_value = t2
+                save_report(sample_report)
+
+            reports = list_reports(limit=5)
+            assert len(reports) == 2
+            _, _, summary = reports[0]
+            assert summary["threat_count"] == 3  # 2 subsystem + 1 cross-cutting
+
+
+# ---------------------------------------------------------------------------
+# OWASP column rendering — appears only when threats carry the codes
+# ---------------------------------------------------------------------------
+
+
+def _report_with_owasp(sample_plan, *, owasp_llm: str | None = None, owasp_asi: str | None = None):
+    from stride_gpt.core.schemas import SubsystemFinding
+
+    threat: dict = {
+        "Threat Type": "Tampering",
+        "Scenario": "Prompt injection via uploaded doc",
+        "Potential Impact": "Compromised analysis",
+    }
+    if owasp_llm is not None:
+        threat["OWASP_LLM"] = owasp_llm
+    if owasp_asi is not None:
+        threat["OWASP_ASI"] = owasp_asi
+    return AnalysisReport(
+        plan=sample_plan,
+        findings=[SubsystemFinding(subsystem="Auth", threats=[threat])],
+        metadata={},
+    )
+
+
+class TestOwaspColumns:
+    def test_columns_appear_when_codes_present(self, sample_plan):
+        report = _report_with_owasp(sample_plan, owasp_llm="LLM01", owasp_asi="ASI01")
+        md = render_markdown(report)
+        assert "OWASP LLM" in md
+        assert "OWASP ASI" in md
+        assert "LLM01" in md
+        assert "ASI01" in md
+
+    def test_only_llm_column_when_no_asi(self, sample_plan):
+        report = _report_with_owasp(sample_plan, owasp_llm="LLM05", owasp_asi=None)
+        md = render_markdown(report)
+        assert "OWASP LLM" in md
+        assert "OWASP ASI" not in md
+        assert "LLM05" in md
+
+    def test_columns_absent_for_web_report(self, sample_report):
+        """The default sample_report fixture is a web app — no OWASP codes."""
+        md = render_markdown(sample_report)
+        assert "OWASP LLM" not in md
+        assert "OWASP ASI" not in md
+        assert "Spoofing" in md  # smoke check the body still renders
+
+    def test_null_owasp_renders_as_empty_cell(self, sample_plan):
+        """A null OWASP_ASI on one threat alongside a non-null on another
+        must render as a blank cell, not the literal 'None'."""
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        report = AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(subsystem="X", threats=[
+                {"Threat Type": "T", "Scenario": "s", "Potential Impact": "i",
+                 "OWASP_LLM": "LLM01", "OWASP_ASI": "ASI01"},
+                {"Threat Type": "T", "Scenario": "s2", "Potential Impact": "i2",
+                 "OWASP_LLM": "LLM02", "OWASP_ASI": None},
+            ])],
+            metadata={},
+        )
+        md = render_markdown(report)
+        assert "None" not in md.split("Threats")[-1].split("## ")[0]
+
+    def test_cross_cutting_table_includes_owasp(self, sample_plan):
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        report = AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(
+                subsystem="X",
+                threats=[{"Threat Type": "T", "Scenario": "s", "Potential Impact": "i",
+                          "OWASP_LLM": "LLM01"}],
+            )],
+            cross_cutting_threats=[{
+                "Threat Type": "Tampering",
+                "Scenario": "cc",
+                "Potential Impact": "cc impact",
+                "Affected Subsystems": ["X"],
+                "OWASP_LLM": "LLM01",
+            }],
+            metadata={},
+        )
+        md = render_markdown(report)
+        cc_section = md.split("Cross-Cutting Threats")[1]
+        assert "OWASP LLM" in cc_section
+        assert "Affected Subsystems" in cc_section
+
+    def test_from_json_renderer_picks_up_owasp(self, sample_plan):
+        """The disk-replay path (rendering a saved JSON report) must also
+        surface OWASP columns — that's the path /reports uses."""
+        report = _report_with_owasp(sample_plan, owasp_llm="LLM01", owasp_asi="ASI06")
+        data = render_json(report)
+        md = render_markdown_from_json(data)
+        assert "OWASP LLM" in md
+        assert "OWASP ASI" in md
+        assert "ASI06" in md
+
+    def test_sarif_properties_include_owasp(self, sample_plan):
+        report = _report_with_owasp(sample_plan, owasp_llm="LLM01", owasp_asi="ASI01")
+        sarif = render_sarif(report)
+        result = sarif["runs"][0]["results"][0]
+        assert result["properties"]["owasp_llm"] == "LLM01"
+        assert result["properties"]["owasp_asi"] == "ASI01"
+
+    def test_sarif_omits_owasp_when_null(self, sample_plan):
+        report = _report_with_owasp(sample_plan, owasp_llm="LLM01", owasp_asi=None)
+        sarif = render_sarif(report)
+        result = sarif["runs"][0]["results"][0]
+        assert result["properties"]["owasp_llm"] == "LLM01"
+        assert "owasp_asi" not in result["properties"]
+
+
+class TestInsiderCategoryColumn:
+    """The insider-threat lens adds an INSIDER_CATEGORY field to threats.
+    Conditional column, same pattern as OWASP_LLM / OWASP_ASI."""
+
+    def _report_with_insider(self, sample_plan, category):
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        threat = {
+            "Threat Type": "Information Disclosure",
+            "Scenario": "Agent harvests credentials from env vars",
+            "Potential Impact": "Lateral movement",
+            "INSIDER_CATEGORY": category,
+        }
+        return AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(subsystem="Agent", threats=[threat])],
+            metadata={},
+        )
+
+    def test_column_appears_when_insider_present(self, sample_plan):
+        report = self._report_with_insider(sample_plan, "Credential Compromise")
+        md = render_markdown(report)
+        assert "Insider Category" in md
+        assert "Credential Compromise" in md
+
+    def test_column_absent_when_no_insider(self, sample_report):
+        md = render_markdown(sample_report)
+        assert "Insider Category" not in md
+
+    def test_three_lenses_render_together(self, sample_plan):
+        """A threat can carry all three lenses (LLM + ASI + Insider) — the
+        renderer must include all three columns."""
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        report = AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(subsystem="Agent", threats=[{
+                "Threat Type": "Information Disclosure",
+                "Scenario": "RAG leaks PII via exfiltration",
+                "Potential Impact": "Mass disclosure",
+                "OWASP_LLM": "LLM02",
+                "OWASP_ASI": "ASI06",
+                "INSIDER_CATEGORY": "Data Exfiltration",
+            }])],
+            metadata={},
+        )
+        md = render_markdown(report)
+        assert "OWASP LLM" in md
+        assert "OWASP ASI" in md
+        assert "Insider Category" in md
+        # And all values render in the same row
+        assert "LLM02" in md
+        assert "ASI06" in md
+        assert "Data Exfiltration" in md
+
+    def test_sarif_properties_carry_insider_category(self, sample_plan):
+        report = self._report_with_insider(sample_plan, "Data Exfiltration")
+        sarif = render_sarif(report)
+        result = sarif["runs"][0]["results"][0]
+        assert result["properties"]["insider_category"] == "Data Exfiltration"
+
+    def test_sarif_omits_insider_when_null(self, sample_plan):
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        report = AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(subsystem="X", threats=[{
+                "Threat Type": "T", "Scenario": "s", "Potential Impact": "i",
+                "INSIDER_CATEGORY": None,
+            }])],
+            metadata={},
+        )
+        sarif = render_sarif(report)
+        result = sarif["runs"][0]["results"][0]
+        assert "insider_category" not in result["properties"]
+
+    def test_from_json_renderer_picks_up_insider(self, sample_plan):
+        from stride_gpt.agent.report import render_json
+        report = self._report_with_insider(sample_plan, "Infrastructure Sabotage")
+        data = render_json(report)
+        md = render_markdown_from_json(data)
+        assert "Insider Category" in md
+        assert "Infrastructure Sabotage" in md
+
+
+class TestMitreAttackColumn:
+    """MITRE ATT&CK technique mappings carried on each threat dict. Same
+    conditional-column pattern as the OWASP / Insider lenses, but the field
+    holds a list of ``{id, name}`` objects rather than a single code."""
+
+    def _report_with_mitre(self, sample_plan, techniques):
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        threat = {
+            "Threat Type": "Spoofing",
+            "Scenario": "Brute force on login endpoint",
+            "Potential Impact": "Account takeover",
+            "MITRE_ATTACK": techniques,
+        }
+        return AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(subsystem="Auth", threats=[threat])],
+            metadata={},
+        )
+
+    def test_column_appears_when_techniques_present(self, sample_plan):
+        report = self._report_with_mitre(
+            sample_plan,
+            [{"id": "T1110", "name": "Brute Force"}],
+        )
+        md = render_markdown(report)
+        assert "MITRE ATT&CK" in md
+        assert "T1110 (Brute Force)" in md
+
+    def test_column_absent_when_no_mitre(self, sample_report):
+        md = render_markdown(sample_report)
+        assert "MITRE ATT&CK" not in md
+
+    def test_multiple_techniques_render_in_one_cell(self, sample_plan):
+        report = self._report_with_mitre(
+            sample_plan,
+            [
+                {"id": "T1041", "name": "Exfiltration Over C2 Channel"},
+                {"id": "AML.T0024", "name": "Exfiltration via AI Inference API"},
+            ],
+        )
+        md = render_markdown(report)
+        assert "T1041 (Exfiltration Over C2 Channel)" in md
+        assert "AML.T0024 (Exfiltration via AI Inference API)" in md
+
+    def test_empty_list_does_not_create_column(self, sample_plan):
+        """A threat carrying ``MITRE_ATTACK: []`` must not trigger the column
+        — empty is a valid "no mapping" emission from the model."""
+        report = self._report_with_mitre(sample_plan, [])
+        md = render_markdown(report)
+        assert "MITRE ATT&CK" not in md
+
+    def test_sarif_properties_carry_mitre_ids(self, sample_plan):
+        report = self._report_with_mitre(
+            sample_plan,
+            [{"id": "T1110", "name": "Brute Force"}, {"id": "T1078", "name": "Valid Accounts"}],
+        )
+        sarif = render_sarif(report)
+        result = sarif["runs"][0]["results"][0]
+        assert result["properties"]["mitre_attack"] == ["T1110", "T1078"]
+
+    def test_sarif_omits_mitre_when_empty(self, sample_plan):
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        report = AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(subsystem="X", threats=[{
+                "Threat Type": "T", "Scenario": "s", "Potential Impact": "i",
+                "MITRE_ATTACK": [],
+            }])],
+            metadata={},
+        )
+        sarif = render_sarif(report)
+        result = sarif["runs"][0]["results"][0]
+        assert "mitre_attack" not in result["properties"]
+
+    def test_from_json_renderer_picks_up_mitre(self, sample_plan):
+        from stride_gpt.agent.report import render_json
+
+        report = self._report_with_mitre(
+            sample_plan,
+            [{"id": "T1190", "name": "Exploit Public-Facing Application"}],
+        )
+        data = render_json(report)
+        md = render_markdown_from_json(data)
+        assert "MITRE ATT&CK" in md
+        assert "T1190 (Exploit Public-Facing Application)" in md
+
+    def test_cross_cutting_mitre_column(self, sample_plan):
+        """Cross-cutting threats use the same threat dict shape, so they
+        carry MITRE the same way per-subsystem threats do — and both tables
+        must surface the column together."""
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        report = AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(subsystem="Auth", threats=[{
+                "Threat Type": "Spoofing", "Scenario": "s", "Potential Impact": "i",
+            }])],
+            cross_cutting_threats=[{
+                "Threat Type": "Tampering",
+                "Scenario": "Shared CSRF gap",
+                "Potential Impact": "Forgery",
+                "Affected Subsystems": ["Auth", "API"],
+                "MITRE_ATTACK": [{"id": "T1565", "name": "Data Manipulation"}],
+            }],
+            metadata={},
+        )
+        md = render_markdown(report)
+        assert "MITRE ATT&CK" in md
+        assert "T1565 (Data Manipulation)" in md
+
+    def test_comma_separated_string_shape_renders_everywhere(self, sample_plan):
+        """#134: smaller worker models emit MITRE_ATTACK as one comma-separated
+        string. The column previously showed but every cell (and the SARIF
+        property) came out blank. Assert the string shape now flows through
+        markdown, SARIF, and HTML alike."""
+        report = self._report_with_mitre(sample_plan, "T1110, T1078, AML.T0051")
+
+        md = render_markdown(report)
+        assert "MITRE ATT&CK" in md
+        assert "| T1110, T1078, AML.T0051 |" in md
+
+        sarif = render_sarif(report)
+        result = sarif["runs"][0]["results"][0]
+        assert result["properties"]["mitre_attack"] == ["T1110", "T1078", "AML.T0051"]
+
+        html = render_html(report)
+        # Each ID becomes a linked pill; AML routes to ATLAS, T-codes to ATT&CK.
+        assert "https://attack.mitre.org/techniques/T1110/" in html
+        assert "https://atlas.mitre.org/techniques/AML.T0051/" in html
+
+
+# ---------------------------------------------------------------------------
+# Report persistence — separate folders for /analyze and /quick
+# ---------------------------------------------------------------------------
+
+
+class TestRenderHtml:
+    """The HTML renderer is the human-facing companion to the JSON report.
+    Tests assert on shape and key fragments, not whole-document bytes — the
+    Tailwind class soup will churn often, but the structural anchors won't."""
+
+    def test_doctype_and_scaffold(self, sample_report: AnalysisReport):
+        html = render_html(sample_report)
+        assert html.startswith("<!doctype html>")
+        # Pin the exact CDN script tag rather than the bare hostname — CodeQL
+        # otherwise mistakes the substring check for URL allowlist sanitization.
+        assert '<script src="https://cdn.tailwindcss.com">' in html
+        assert "<title>STRIDE Threat Model" in html
+
+    def test_target_name_in_header(self, sample_report: AnalysisReport):
+        html = render_html(sample_report)
+        # plan.target_path = "/tmp/test-app" → name "test-app"
+        assert "test-app" in html
+
+    def test_renders_stride_badges_for_threats(self, sample_report: AnalysisReport):
+        html = render_html(sample_report)
+        # Each threat should appear in a card; the Spoofing badge class is the
+        # canonical "category coding works" smoke check.
+        assert "Spoofing" in html
+        assert "bg-indigo-50" in html
+        assert "brute-force" in html
+
+    def test_renders_cross_cutting_section(self, sample_report: AnalysisReport):
+        html = render_html(sample_report)
+        assert "Cross-cutting threats" in html
+        assert "CSRF" in html
+        # Affected subsystems should appear as pills, not a comma-joined string
+        assert ">Auth<" in html
+        assert ">API<" in html
+
+    def test_renders_recommendations(self, sample_report: AnalysisReport):
+        html = render_html(sample_report)
+        assert "Recommendations" in html
+        assert "rate limiting" in html
+
+    def test_renders_files_analyzed(self, sample_report: AnalysisReport):
+        html = render_html(sample_report)
+        assert "Files analyzed" in html
+        assert "auth.py" in html
+        assert "font-mono" in html
+
+    def test_summary_chips_present(self, sample_report: AnalysisReport):
+        html = render_html(sample_report)
+        # 2 subsystem threats + 1 cross-cutting = 3
+        assert "3 threats" in html
+        assert "1 cross-cutting" in html
+
+    def test_escapes_hostile_threat_text(self, sample_plan):
+        """A threat carrying <script> must not render as a live tag.
+        The renderer is for human review of analysis output, but treat any
+        LLM-produced text as untrusted on the way to a browser."""
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        report = AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(
+                subsystem="Auth",
+                threats=[{
+                    "Threat Type": "Tampering",
+                    "Scenario": "<script>alert('xss')</script>",
+                    "Potential Impact": "User session hijack via </body><script>x</script>",
+                }],
+            )],
+            metadata={},
+        )
+        html = render_html(report)
+        assert "<script>alert" not in html
+        assert "&lt;script&gt;alert" in html
+
+    def test_owasp_pills_appear_when_codes_present(self, sample_plan):
+        report = _report_with_owasp(sample_plan, owasp_llm="LLM01", owasp_asi="ASI06")
+        html = render_html(report)
+        assert "OWASP LLM01" in html
+        assert "ASI ASI06" in html
+
+    def test_owasp_pills_absent_when_codes_missing(self, sample_report: AnalysisReport):
+        """A standard web app has no OWASP_LLM/ASI; pills must not appear at all
+        (not even as empty containers)."""
+        html = render_html(sample_report)
+        assert "OWASP " not in html
+        assert "ASI " not in html
+
+    def test_insider_category_pill(self, sample_plan):
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        report = AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(
+                subsystem="Agent",
+                threats=[{
+                    "Threat Type": "Information Disclosure",
+                    "Scenario": "Agent harvests env vars",
+                    "Potential Impact": "Lateral movement",
+                    "INSIDER_CATEGORY": "Data Exfiltration",
+                }],
+            )],
+            metadata={},
+        )
+        html = render_html(report)
+        assert "Insider: Data Exfiltration" in html
+
+    def test_mitre_enterprise_pill_links_to_attack_mitre(self, sample_plan):
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        report = AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(
+                subsystem="Auth",
+                threats=[{
+                    "Threat Type": "Spoofing",
+                    "Scenario": "Brute force",
+                    "Potential Impact": "ATO",
+                    "MITRE_ATTACK": [{"id": "T1110", "name": "Brute Force"}],
+                }],
+            )],
+            metadata={},
+        )
+        html = render_html(report)
+        # The pill must link to the canonical ATT&CK page and surface the ID
+        # as the visible label (full name kept in the tooltip).
+        assert 'href="https://attack.mitre.org/techniques/T1110/"' in html
+        assert ">T1110<" in html
+        assert 'title="T1110 Brute Force"' in html
+
+    def test_mitre_atlas_pill_links_to_atlas_mitre(self, sample_plan):
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        report = AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(
+                subsystem="Chatbot",
+                threats=[{
+                    "Threat Type": "Tampering",
+                    "Scenario": "Prompt injection via uploaded doc",
+                    "Potential Impact": "Misleading output",
+                    "MITRE_ATTACK": [{"id": "AML.T0051", "name": "LLM Prompt Injection"}],
+                }],
+            )],
+            metadata={},
+        )
+        html = render_html(report)
+        assert 'href="https://atlas.mitre.org/techniques/AML.T0051/"' in html
+        assert ">AML.T0051<" in html
+
+    def test_mitre_pills_absent_when_field_missing(self, sample_report):
+        """A standard web report carries no MITRE_ATTACK — no pill markup,
+        not even empty containers."""
+        html = render_html(sample_report)
+        assert "attack.mitre.org" not in html
+        assert "atlas.mitre.org" not in html
+
+    def test_mitre_pill_falls_back_to_span_for_unknown_id_pattern(self, sample_plan):
+        """A malformed ID that matches neither pattern still renders, but as
+        a plain span instead of a broken link."""
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        report = AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(
+                subsystem="X",
+                threats=[{
+                    "Threat Type": "Spoofing",
+                    "Scenario": "s", "Potential Impact": "i",
+                    "MITRE_ATTACK": [{"id": "WEIRD", "name": "Not a real ID"}],
+                }],
+            )],
+            metadata={},
+        )
+        html = render_html(report)
+        assert ">WEIRD<" in html
+        # No link emitted for the unknown pattern.
+        assert 'href="https://attack.mitre.org/techniques/WEIRD' not in html
+
+    def test_mitre_pill_id_is_html_escaped(self, sample_plan):
+        """Even though valid IDs are alphanumeric, hostile/synthetic input
+        must not bypass escaping on the way to a browser."""
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        report = AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(
+                subsystem="X",
+                threats=[{
+                    "Threat Type": "Spoofing",
+                    "Scenario": "s", "Potential Impact": "i",
+                    "MITRE_ATTACK": [{"id": "<script>", "name": "evil"}],
+                }],
+            )],
+            metadata={},
+        )
+        html = render_html(report)
+        assert "<script>" not in html.split("<title>")[0]  # not in body
+        assert "&lt;script&gt;" in html
+
+    def test_quick_report_renders_with_single_subsystem(self, sample_plan):
+        """The /quick path saves a synthetic 'Application' subsystem with no
+        files_analyzed and an empty overview — the renderer must handle that
+        gracefully (no orphan headers, no empty Files-analyzed block)."""
+        quick_data = {
+            "version": "1.0",
+            "kind": "quick",
+            "generated_at": "2026-01-15T12:00:00+00:00",
+            "target": "my-saas-app",
+            "overview": "",
+            "subsystems": [{
+                "name": "Application",
+                "threats": [{
+                    "Threat Type": "Spoofing",
+                    "Scenario": "Weak password policy",
+                    "Potential Impact": "Account takeover",
+                }],
+                "improvement_suggestions": ["Require MFA"],
+                "files_analyzed": [],
+            }],
+            "cross_cutting_threats": [],
+            "metadata": {"kind": "quick"},
+        }
+        html = render_html_from_json(quick_data)
+        assert "my-saas-app" in html
+        assert "Application" in html
+        assert "Files analyzed" not in html
+        assert "Cross-cutting" not in html
+        # Subsystem count chip suppressed for /quick (only one subsystem)
+        assert "1 subsystems" not in html
+
+    def test_round_trip_via_saved_json(self, sample_report: AnalysisReport, tmp_path):
+        """The disk-replay path must produce byte-identical HTML to a live
+        render — /analyze and /reports share rendering."""
+        live = render_html(sample_report)
+        replay = render_html_from_json(render_json(sample_report))
+        # generated_at is computed at render time from data["generated_at"]
+        # which is set by render_json, so the two should match.
+        assert live == replay
+
+    def test_unknown_stride_category_falls_back(self, sample_plan):
+        """An unrecognised Threat Type must still render — fall back to the
+        neutral badge rather than KeyError."""
+        from stride_gpt.core.schemas import SubsystemFinding
+
+        report = AnalysisReport(
+            plan=sample_plan,
+            findings=[SubsystemFinding(
+                subsystem="X",
+                threats=[{
+                    "Threat Type": "Some Future Category",
+                    "Scenario": "s",
+                    "Potential Impact": "i",
+                }],
+            )],
+            metadata={},
+        )
+        html = render_html(report)
+        assert "Some Future Category" in html
+
+    def test_auto_save_writes_html_companion(
+        self, sample_report: AnalysisReport, tmp_path
+    ):
+        """save_report() must write a .html sibling alongside the .json so
+        users get a browser-viewable report for free."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("stride_gpt.config.REPORTS_DIR", tmp_path)
+            json_path = save_report(sample_report)
+            html_path = json_path.with_suffix(".html")
+            assert html_path.exists()
+            content = html_path.read_text()
+            assert content.startswith("<!doctype html>")
+            assert "Spoofing" in content
+
+    def test_quick_auto_save_writes_html_companion(self, tmp_path, model_pair):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("stride_gpt.config.REPORTS_DIR", tmp_path)
+            output = ThreatModelOutput(
+                threat_model=[{
+                    "Threat Type": "Spoofing",
+                    "Scenario": "x",
+                    "Potential Impact": "y",
+                }],
+                improvement_suggestions=["test"],
+            )
+            json_path = save_quick_report(output, "atlas", models=model_pair)
+            html_path = json_path.with_suffix(".html")
+            assert html_path.exists()
+            assert "atlas" in html_path.read_text()
+
+
+class TestSplitReportFolders:
+    """/analyze and /quick reports must live in separate subdirectories so a
+    coding agent pointed at the 'analyze' folder doesn't see unrelated
+    description-based analyses mixed in."""
+
+    def test_analyze_saves_to_analyze_subdir(self, sample_report, tmp_path):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("stride_gpt.config.REPORTS_DIR", tmp_path)
+            path = save_report(sample_report)
+            assert path.parent == tmp_path / "analyze"
+            assert path.exists()
+
+    def test_quick_saves_to_quick_subdir(self, tmp_path, model_pair):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("stride_gpt.config.REPORTS_DIR", tmp_path)
+            output = ThreatModelOutput(
+                threat_model=[{"Threat Type": "S", "Scenario": "x", "Potential Impact": "y"}],
+                improvement_suggestions=["test"],
+            )
+            path = save_quick_report(output, "atlas", models=model_pair)
+            assert path.parent == tmp_path / "quick"
+            assert path.exists()
+            # The saved JSON must be loadable and carry the kind marker so
+            # downstream tools can tell quick from analyze reports.
+            data = load_report(path)
+            assert data["kind"] == "quick"
+            assert data["metadata"]["kind"] == "quick"
+            assert data["metadata"]["worker_model"] == model_pair.worker.model_name
+            assert data["metadata"]["architect_model"] is None
+
+    def test_quick_metadata_records_call_counts(self, tmp_path, model_pair):
+        """Call counts and the per-tool breakdown must reach the saved JSON.
+        Diagnoses the discovery-skip case: `tool_calls: 0` or a `tools_used`
+        without `load_reference` means the agent never loaded any cards."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("stride_gpt.config.REPORTS_DIR", tmp_path)
+            output = ThreatModelOutput(
+                threat_model=[],
+                improvement_suggestions=[],
+                llm_calls=3,
+                tool_calls=2,
+                tools_used={"list_references": 1, "load_reference": 1},
+            )
+            path = save_quick_report(output, "atlas", models=model_pair)
+            data = load_report(path)
+            assert data["metadata"]["llm_calls"] == 3
+            assert data["metadata"]["tool_calls"] == 2
+            assert data["metadata"]["tools_used"] == {
+                "list_references": 1, "load_reference": 1,
+            }
+
+    def test_list_reports_defaults_to_analyze(self, sample_report, tmp_path):
+        """The default /reports behaviour is the analyze-only view — quick
+        reports must not bleed in unless --quick or --all is passed."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("stride_gpt.config.REPORTS_DIR", tmp_path)
+            save_report(sample_report)
+            save_quick_report(
+                ThreatModelOutput(threat_model=[], improvement_suggestions=[]),
+                "atlas",
+            )
+            analyze_only = list_reports(limit=10)
+            assert len(analyze_only) == 1
+            assert analyze_only[0][2]["kind"] == "analyze"
+
+    def test_list_reports_quick_filter(self, sample_report, tmp_path):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("stride_gpt.config.REPORTS_DIR", tmp_path)
+            save_report(sample_report)
+            save_quick_report(
+                ThreatModelOutput(threat_model=[], improvement_suggestions=[]),
+                "atlas",
+            )
+            quick_only = list_reports(limit=10, kind="quick")
+            assert len(quick_only) == 1
+            assert quick_only[0][2]["kind"] == "quick"
+
+    def test_list_reports_all(self, sample_report, tmp_path):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("stride_gpt.config.REPORTS_DIR", tmp_path)
+            save_report(sample_report)
+            save_quick_report(
+                ThreatModelOutput(threat_model=[], improvement_suggestions=[]),
+                "atlas",
+            )
+            both = list_reports(limit=10, kind="all")
+            assert {r[2]["kind"] for r in both} == {"analyze", "quick"}
+
+    def test_legacy_root_reports_still_surfaced(self, sample_report, tmp_path):
+        """Reports saved before the split (sitting in reports/ root) must
+        still appear in the listing — tagged 'legacy' — so users can find
+        old work without manual migration."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("stride_gpt.config.REPORTS_DIR", tmp_path)
+            tmp_path.mkdir(parents=True, exist_ok=True)
+            (tmp_path / "old_report.json").write_text(json.dumps({
+                "version": "1.0",
+                "generated_at": "2026-01-01T00:00:00Z",
+                "target": "/some/old/path",
+                "subsystems": [{"threats": [{}]}],
+                "cross_cutting_threats": [],
+                "metadata": {},
+            }))
+            save_report(sample_report)
+            all_reports = list_reports(limit=10)
+            kinds = {r[2]["kind"] for r in all_reports}
+            assert "legacy" in kinds
+            assert "analyze" in kinds
+
+
+# ---------------------------------------------------------------------------
+# Evidence — per-threat locations
+# ---------------------------------------------------------------------------
+
+
+def _evidence_report(*evidence: dict) -> dict:
+    """A saved-report dict carrying one threat with the given evidence."""
+    return {
+        "subsystems": [
+            {
+                "name": "Auth",
+                "files_analyzed": ["auth.py", "login.py", "db.py", "extra.py"],
+                "threats": [
+                    {
+                        "Threat Type": "Spoofing",
+                        "Scenario": "Weak auth",
+                        "Potential Impact": "Takeover",
+                        "evidence": list(evidence),
+                    }
+                ],
+            }
+        ],
+        "cross_cutting_threats": [],
+    }
+
+
+def _locations(data: dict) -> list[dict]:
+    return render_sarif_from_json(data)["runs"][0]["results"][0].get("locations", [])
+
+
+class TestSarifEvidenceLocations:
+    """A threat should point at the code it cites, not at the subsystem's
+    first three files — that's what put threats against unrelated files."""
+
+    def test_one_location_per_verified_item_with_its_line_range(self):
+        data = _evidence_report(
+            {"path": "src/auth.py", "snippet": "x", "verified": True,
+             "start_line": 12, "end_line": 18},
+            {"path": "src/db.py", "snippet": "y", "verified": True,
+             "start_line": 4, "end_line": 4},
+        )
+        assert _locations(data) == [
+            {"physicalLocation": {"artifactLocation": {"uri": "src/auth.py"},
+                                  "region": {"startLine": 12, "endLine": 18}}},
+            {"physicalLocation": {"artifactLocation": {"uri": "src/db.py"},
+                                  "region": {"startLine": 4, "endLine": 4}}},
+        ]
+
+    def test_unverified_items_are_not_locations(self):
+        """An unverified snippet has no line range, so pointing at the file
+        would be the same imprecision the fallback already has."""
+        data = _evidence_report(
+            {"path": "src/auth.py", "snippet": "x", "verified": True,
+             "start_line": 3, "end_line": 3},
+            {"path": "src/nope.py", "snippet": "y", "verified": False},
+        )
+        assert [loc["physicalLocation"]["artifactLocation"]["uri"] for loc in _locations(data)] == [
+            "src/auth.py"
+        ]
+
+    def test_falls_back_to_files_analyzed_when_nothing_verified(self):
+        data = _evidence_report({"path": "src/nope.py", "snippet": "y", "verified": False})
+        assert _locations(data) == [
+            {"physicalLocation": {"artifactLocation": {"uri": f}}}
+            for f in ("auth.py", "login.py", "db.py")
+        ]
+
+    def test_paths_are_normalised_for_code_scanning(self):
+        """GitHub matches these against repository paths, so a leading ./ or
+        a Windows separator stops the location resolving."""
+        data = _evidence_report(
+            {"path": "./src\\auth.py", "snippet": "x", "verified": True,
+             "start_line": 1, "end_line": 1}
+        )
+        assert _locations(data)[0]["physicalLocation"]["artifactLocation"]["uri"] == "src/auth.py"
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            pytest.param({"verified": True, "start_line": 0, "end_line": 4}, id="zero-start"),
+            pytest.param({"verified": True, "start_line": 9, "end_line": 4}, id="end-before-start"),
+            pytest.param({"verified": True, "start_line": "3", "end_line": "4"}, id="strings"),
+            pytest.param({"verified": True, "start_line": True, "end_line": True}, id="bools"),
+            pytest.param({"verified": True}, id="no-range"),
+            pytest.param({"verified": True, "start_line": 1, "end_line": 1, "path": ""}, id="no-path"),
+        ],
+    )
+    def test_malformed_evidence_degrades_to_the_file_fallback(self, item):
+        """GitHub rejects a whole SARIF upload on one schema violation, and a
+        saved report can hold anything an LLM emitted."""
+        data = _evidence_report({"path": "src/auth.py", "snippet": "x", **item})
+        locations = _locations(data)
+        assert all("region" not in loc["physicalLocation"] for loc in locations)
+        assert len(locations) == 3
+
+    @pytest.mark.parametrize("evidence", ["not a list", None, [7, "x"]])
+    def test_junk_evidence_does_not_crash(self, evidence):
+        data = _evidence_report()
+        data["subsystems"][0]["threats"][0]["evidence"] = evidence
+        assert len(_locations(data)) == 3
+
+    def test_verification_status_in_properties_and_message(self):
+        data = _evidence_report(
+            {"path": "src/auth.py", "snippet": "x", "verified": True,
+             "start_line": 1, "end_line": 1},
+            {"path": "src/nope.py", "snippet": "y", "verified": False},
+        )
+        result = render_sarif_from_json(data)["runs"][0]["results"][0]
+        assert result["properties"]["evidence_verified"] == 1
+        assert result["properties"]["evidence_total"] == 2
+        # Also in the message: code-scanning UIs bury properties.
+        assert "Evidence: 1 of 2 snippets verified" in result["message"]["text"]
+
+    def test_pre_change_reports_are_unchanged(self):
+        """A report saved before evidence existed must render as it did."""
+        data = _evidence_report()
+        del data["subsystems"][0]["threats"][0]["evidence"]
+        result = render_sarif_from_json(data)["runs"][0]["results"][0]
+        assert "evidence_total" not in result["properties"]
+        assert "Evidence:" not in result["message"]["text"]
+        assert result["locations"] == [
+            {"physicalLocation": {"artifactLocation": {"uri": f}}}
+            for f in ("auth.py", "login.py", "db.py")
+        ]
+
+
+class TestEvidenceInMarkdownAndHtml:
+    def test_column_appears_only_when_a_threat_has_evidence(self, sample_report):
+        assert "Evidence" not in render_markdown(sample_report)
+        sample_report.findings[0].threats[0]["evidence"] = [
+            {"path": "auth.py", "snippet": "x", "verified": True,
+             "start_line": 12, "end_line": 18}
+        ]
+        md = render_markdown(sample_report)
+        assert "| Evidence |" in md
+        assert "auth.py:12-18" in md
+
+    def test_unverified_cell_says_so(self, sample_report):
+        sample_report.findings[0].threats[0]["evidence"] = [
+            {"path": "auth.py", "snippet": "x", "verified": False}
+        ]
+        assert "auth.py (unverified)" in render_markdown(sample_report)
+
+    def test_single_line_range_is_not_written_as_a_span(self, sample_report):
+        sample_report.findings[0].threats[0]["evidence"] = [
+            {"path": "auth.py", "snippet": "x", "verified": True,
+             "start_line": 7, "end_line": 7}
+        ]
+        row = next(
+            line for line in render_markdown(sample_report).split("\n")
+            if "brute-force" in line
+        )
+        assert row.endswith("| auth.py:7 |")
+
+    def test_html_shows_the_snippet_and_its_range(self, sample_report):
+        sample_report.findings[0].threats[0]["evidence"] = [
+            {"path": "auth.py", "snippet": "if user == 'admin':", "verified": True,
+             "start_line": 12, "end_line": 18},
+            {"path": "gone.py", "snippet": "y", "verified": False},
+        ]
+        out = render_html(sample_report)
+        assert "auth.py:12-18" in out
+        assert "if user == &#x27;admin&#x27;:" in out
+        assert "unverified" in out
+
+    def test_html_escapes_hostile_snippets(self, sample_report):
+        sample_report.findings[0].threats[0]["evidence"] = [
+            {"path": "<img src=x onerror=alert(1)>", "verified": True,
+             "snippet": "</code></pre><script>alert(1)</script>",
+             "start_line": 1, "end_line": 1}
+        ]
+        out = render_html(sample_report)
+        assert "<script>alert(1)</script>" not in out
+        assert "<img src=x" not in out
+
+    def test_html_has_no_evidence_row_without_evidence(self, sample_report):
+        assert "Evidence" not in render_html(sample_report)
+
+
+_AMBIGUOUS = {
+    "path": "src/auth.py", "snippet": "x", "verified": True,
+    "start_line": 2, "end_line": 2, "occurrences": 3,
+}
+
+
+class TestAmbiguousEvidence:
+    """A snippet appearing twice is located at the first match.
+
+    The matcher records that; without surfacing it, code scanning pins the
+    threat to line 2 when the weakness is the copy on line 5, and presents
+    that as verified.
+    """
+
+
+    def test_markdown_cell_says_how_many_matches(self, sample_report):
+        sample_report.findings[0].threats[0]["evidence"] = [_AMBIGUOUS]
+        assert "src/auth.py:2 (3 matches)" in render_markdown(sample_report)
+
+    def test_single_match_says_nothing(self, sample_report):
+        sample_report.findings[0].threats[0]["evidence"] = [
+            {**_AMBIGUOUS, "occurrences": 1}
+        ]
+        md = render_markdown(sample_report)
+        assert "src/auth.py:2" in md
+        assert "matches" not in md
+
+    def test_html_carries_a_matches_pill(self, sample_report):
+        sample_report.findings[0].threats[0]["evidence"] = [_AMBIGUOUS]
+        assert "3 matches" in render_html(sample_report)
+
+    def test_sarif_flags_it_in_properties_and_message(self):
+        data = _evidence_report(_AMBIGUOUS)
+        result = render_sarif_from_json(data)["runs"][0]["results"][0]
+        assert result["properties"]["evidence_ambiguous"] is True
+        assert "first match" in result["message"]["text"]
+
+    def test_sarif_stays_quiet_when_every_match_is_unique(self):
+        data = _evidence_report({**_AMBIGUOUS, "occurrences": 1})
+        result = render_sarif_from_json(data)["runs"][0]["results"][0]
+        assert "evidence_ambiguous" not in result["properties"]
+        assert "first match" not in result["message"]["text"]
+
+    def test_an_unverified_item_is_never_called_ambiguous(self):
+        data = _evidence_report({**_AMBIGUOUS, "verified": False})
+        result = render_sarif_from_json(data)["runs"][0]["results"][0]
+        assert "evidence_ambiguous" not in result["properties"]

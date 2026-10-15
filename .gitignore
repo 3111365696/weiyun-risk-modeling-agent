@@ -1,0 +1,25 @@
+__pycache__/
+.env
+.pytest_cache/
+.ruff_cache/
+.streamlit/secrets.toml
+api_key.txt
+test_functions.py
+venv/
+.venv/
+TODO.md
+.DS_Store
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Doc-review report (local only)
+doc-review.html
+
+# Test-optimizer report (local only)
+test-optimization.html
+
+# Local tooling artifacts
+.coverage
+.claude/

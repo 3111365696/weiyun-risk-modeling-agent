@@ -1,0 +1,45 @@
+[theme]
+base = "dark"
+
+# 主色：克制的紫罗兰，避免高饱和荧光紫
+primaryColor = "#7C6BD6"
+violetColor = "#7C6BD6"
+violetBackgroundColor = "#2A2340"
+
+backgroundColor = "#14121B"
+secondaryBackgroundColor = "#1C1927"
+textColor = "#DAD7E4"
+linkColor = "#A99AF0"
+linkUnderline = false
+
+borderColor = "#2C2839"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "6px"
+buttonRadius = "6px"
+baseFontSize = 15
+
+font = "-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, sans-serif"
+headingFont = "-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Hiragino Sans GB, Microsoft YaHei, Noto Sans CJK SC, sans-serif"
+headingFontWeights = 600
+codeFont = "JetBrains Mono, SF Mono, Menlo, Consolas, monospace"
+codeBackgroundColor = "#0F0D16"
+codeTextColor = "#C9C3DB"
+
+# 状态色去饱和，接近专业监控台而不是“AI 提示卡”
+redColor = "#E5484D"
+greenColor = "#30A46C"
+yellowColor = "#FFB224"
+orangeColor = "#F76B15"
+blueColor = "#4E7DE8"
+
+[theme.sidebar]
+backgroundColor = "#100E17"
+secondaryBackgroundColor = "#1A1724"
+textColor = "#CFCBDD"
+primaryColor = "#7C6BD6"
+borderColor = "#2A2540"
+showWidgetBorder = true
+
+[client]
+toolbarMode = "minimal"

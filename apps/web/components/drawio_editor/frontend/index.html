@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>draw.io Editor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #fff; }
+
+    #toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: #f0f2f6;
+      border-bottom: 1px solid #d0d3da;
+    }
+
+    .btn {
+      padding: 5px 16px;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      cursor: pointer;
+      font-size: 13px;
+      font-family: inherit;
+      background: #fff;
+      transition: background 0.1s;
+    }
+    .btn:hover { background: #e8eaf0; }
+
+    .btn-primary {
+      background: #ff4b4b;
+      color: #fff;
+      border-color: #c83030;
+    }
+    .btn-primary:hover { background: #d93030; }
+
+    #status {
+      margin-left: auto;
+      font-size: 12px;
+      color: #6c757d;
+      white-space: nowrap;
+    }
+
+    #drawio-frame {
+      width: 100%;
+      height: 590px;
+      border: none;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <button class="btn btn-primary" id="btn-save">Save &amp; Close</button>
+    <button class="btn" id="btn-cancel">Cancel</button>
+    <span id="status">Loading editor…</span>
+  </div>
+  <!-- src is set from the Streamlit-provided editor URL on first render so the
+       host (embed.diagrams.net or a self-hosted draw.io) is configurable. -->
+  <iframe id="drawio-frame" allowfullscreen></iframe>
+
+  <script>
+    /* ── Streamlit component IPC (raw postMessage, no npm build needed) ──
+       All outgoing messages MUST include isStreamlitMessage: true or
+       Streamlit's frontend will silently ignore them.               ── */
+    var FRAME_HEIGHT = 650;
+
+    function stPost(type, extra) {
+      var msg = Object.assign({ isStreamlitMessage: true, type: "streamlit:" + type }, extra || {});
+      window.parent.postMessage(msg, "*");
+    }
+
+    stPost("componentReady", { apiVersion: 1 });
+    stPost("setFrameHeight", { height: FRAME_HEIGHT });
+
+    /* ── draw.io editor state ── */
+    var drawioFrame = document.getElementById("drawio-frame");
+    var statusEl    = document.getElementById("status");
+
+    var editorReady   = false;  // draw.io fired "init"
+    var pendingXml    = "";     // XML to load once the editor is ready
+    var savedXml      = "";     // last XML we know about (auto-saved or explicitly exported)
+    var pendingSave   = false;  // we fired an export request and are awaiting the result
+    var hasLoaded     = false;  // at least one load has been issued into the editor
+    var lastLoadedXml = null;   // XML string most recently loaded (dedupes reloads)
+    var DRAWIO_ORIGIN = "*";    // postMessage target origin; set from the configured URL
+    var frameSrcSet   = false;  // iframe src assigned yet
+
+    var BLANK_XML = [
+      '<mxGraphModel>',
+      '  <root>',
+      '    <mxCell id="0"/>',
+      '    <mxCell id="1" parent="0"/>',
+      '  </root>',
+      '</mxGraphModel>'
+    ].join("\n");
+
+    function postToDrawio(msg) {
+      drawioFrame.contentWindow.postMessage(JSON.stringify(msg), DRAWIO_ORIGIN);
+    }
+
+    /* Point the iframe at the configured draw.io editor (embed.diagrams.net by
+       default, or a self-hosted instance) and lock the postMessage origin to it.
+       Runs once, from the first Streamlit render. */
+    function ensureFrame(url) {
+      if (frameSrcSet || !url) return;
+      frameSrcSet = true;
+      try { DRAWIO_ORIGIN = new URL(url).origin; } catch (_) { DRAWIO_ORIGIN = "*"; }
+      drawioFrame.src = url;
+    }
+
+    /* Load XML into the editor (or a blank canvas). autosave:1 makes draw.io emit
+       "autosave"/"save" events carrying the current XML as the user edits. */
+    function loadXml(xml) {
+      var hasContent = !!(xml && xml.trim());
+      lastLoadedXml = xml || "";
+      hasLoaded = true;
+      postToDrawio({ action: "load", autosave: 1, xml: hasContent ? xml : BLANK_XML });
+      statusEl.textContent = hasContent
+        ? "Diagram loaded (" + xml.length + " chars)"
+        : "Blank canvas";
+    }
+
+    /* ── Toolbar buttons ── */
+    document.getElementById("btn-save").addEventListener("click", function () {
+      pendingSave = true;
+      statusEl.textContent = "Exporting…";
+      postToDrawio({ action: "export", format: "xml" });
+    });
+
+    document.getElementById("btn-cancel").addEventListener("click", function () {
+      stPost("setComponentValue", { value: { action: "close", xml: savedXml }, dataType: "json" });
+    });
+
+    /* ── Message hub ── */
+    window.addEventListener("message", function (evt) {
+      var data = evt.data;
+
+      /* --- Streamlit → component: render with new props ---
+         NB: the *incoming* render forward message does NOT carry
+         isStreamlitMessage (only messages we SEND must set it), so we key off
+         type alone. args is normally an object but guard for a JSON string. */
+      if (data && typeof data === "object" && data.type === "streamlit:render") {
+        var args = data.args;
+        if (typeof args === "string") {
+          try { args = JSON.parse(args); } catch (_) { args = {}; }
+        }
+        var xml = (args && args.xml) || "";
+        ensureFrame((args && args.drawio_url) || "");
+        stPost("setFrameHeight", { height: FRAME_HEIGHT });
+
+        if (editorReady) {
+          /* Load on the first render after (re)mount, or when the host sends a
+             genuinely different XML. Re-loading identical XML is skipped so an
+             unrelated Streamlit rerun can't clobber in-progress edits. */
+          if (!hasLoaded || (xml && xml !== lastLoadedXml)) {
+            loadXml(xml);
+          }
+        } else {
+          /* Buffer the latest XML until the editor fires "init". */
+          pendingXml = xml;
+        }
+        return;
+      }
+
+      /* --- draw.io → component: JSON string events --- */
+      if (typeof data !== "string") return;
+      /* Only trust string messages from the configured draw.io origin. */
+      if (DRAWIO_ORIGIN !== "*" && evt.origin !== DRAWIO_ORIGIN) return;
+      var msg;
+      try { msg = JSON.parse(data); } catch (_) { return; }
+
+      switch (msg.event) {
+        case "init":
+          editorReady = true;
+          loadXml(pendingXml);
+          pendingXml = "";
+          break;
+
+        case "load":
+          break;
+
+        case "autosave":
+          /* Fired as the user edits (autosave:1 on load). Keep the latest XML. */
+          savedXml = msg.xml || savedXml;
+          break;
+
+        case "save":
+          /* Native draw.io Ctrl+S / save button. */
+          savedXml = msg.xml || savedXml;
+          statusEl.textContent = "Saved";
+          break;
+
+        case "export":
+          if (pendingSave) {
+            pendingSave = false;
+            /* draw.io returns XML in msg.xml for format=xml; msg.data is a fallback. */
+            var xml = msg.xml || msg.data || savedXml;
+            savedXml = xml;
+            stPost("setComponentValue", { value: { action: "save", xml: xml }, dataType: "json" });
+          }
+          break;
+
+        case "close":
+          stPost("setComponentValue", { value: { action: "close", xml: savedXml }, dataType: "json" });
+          break;
+      }
+    });
+  </script>
+</body>
+</html>
