@@ -443,3 +443,35 @@ Python 看到函数内存在对 `_t` 的赋值就把它当作局部变量，于�
 - i18n 门禁：`tests/test_i18n_coverage.py`（AST 扫描，允许标签字典/日志/提示词/数据枚举），
   修复 91 处遗漏并顺手修掉两处「翻译值当数据键」的统计归零问题
 - 41 个新测试（RBAC 22 + i18n + 账号 32 已在前两阶段）；全量 1047 passed，ruff 全绿
+
+## P9 交付与规模化
+
+### P9-1 版本与迁移
+- `common/version.py`：版本来自 pyproject（元数据兜底）、git 提交号（未提交加 `*`）、
+  Python/平台信息；api/shared/backup 统一引用，登录页与状态页显示 `v1.0.0 (commit)`
+- `schema_migrations` 表：4 条基线迁移登记（老库自动补记）；`schema_version()` /
+  `migration_history()`；`init_db()` 增加进程内缓存（按 DB 文件路径），减少重复 DDL
+- 产品版本定为 1.0.0，新增 `CHANGELOG.md`
+
+### P9-2 部署物料
+- `STRIDE_GPT_DATA_DIR` 环境变量（容器/systemd 挂卷的基础）
+- `Dockerfile.api`（API 与调度器共用）、`compose.yaml`（三个服务 + 健康检查 + 命名卷）
+- `deploy/systemd/wy-{web,api,scheduler}.service` + `wy.env.example`（含安全加固项）
+- `scripts/install.sh`（环境检查→uv sync→初始化→指引）、`upgrade.sh`（备份→更新→依赖→
+  迁移自检→重启指引）、`run_web.sh`；`.env.example` 增补部署变量
+
+### P9-3 文档体系
+- `docs/user-guide.md`（流程/页面/台账/报告/FAQ）、`docs/admin-guide.md`（权限模型/配置/
+  API Key/备份/审计/速查）、`docs/ops-guide.md`（架构/安装/环境变量/日志/备份/升级/
+  数据库维护/安全加固/故障表/规模化路线）
+- `README.md` 重写为产品首页
+
+### P9-4 端到端与性能
+- 进程内 Mock LLM（`tests/support_mock_llm.py`）；`tests/test_e2e_flow.py` 覆盖：
+  生成→归档→台账更新→DREAD 回填→SARIF/STIX/Threat Dragon→ZIP→备份恢复→全流程六类产物
+- `tests/test_perf_smoke.py` + `scripts/bench.py`（参考值：2000 条威胁写入 12ms、
+  列 11ms、STIX 50ms、备份+校验 23ms、Semgrep 扫描 apps 2.1s）
+
+### 规模化说明
+PostgreSQL 后端未在本阶段实现（store.py 为 SQLite 专用，替换需成体系改造），
+已在运维手册「规模化路线」中给出迁移前置条件与拆分部署建议。
