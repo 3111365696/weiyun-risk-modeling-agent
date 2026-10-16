@@ -22,10 +22,13 @@ from stride_gpt.agent.loop import run_analysis
 from stride_gpt.agent.report import render_json, render_markdown, render_sarif
 from stride_gpt.core.schemas import ModelPair
 
+from . import logging_setup as _logging
 from . import scanners as _scanners
 from . import standards as _standards
 from . import store
 from .generation import build_llm_config, resolve_model_settings
+
+_log = _logging.get_logger("agentic")
 
 # 解压安全上限
 MAX_TOTAL_BYTES = 300 * 1024 * 1024
@@ -354,21 +357,28 @@ def _collect_leads(root: Path, *, enabled: bool, on_event, cancel_check):
         return []
     if cancel_check and cancel_check():
         raise AgenticCancelledError("任务已取消")
+    _log.info("静态分析开始", extra={"root": str(root)[:200]})
     if on_event:
         on_event("scanner_start", {"root": str(root)})
     try:
         result = _scanners.run_scanners(root)
     except Exception as exc:
+        _log.warning("静态分析失败（已跳过）", extra={"error": f"{type(exc).__name__}: {exc}"})
         if on_event:
             on_event("scanner_error", {"error": f"{type(exc).__name__}: {exc}"})
         return []
     leads = result["leads"]
+    summary = _scanners.summarize_for_report(leads)
+    _log.info(
+        "静态分析完成",
+        extra={"leads": summary.get("total", 0), "by_tool": summary.get("by_tool")},
+    )
     if on_event:
         on_event(
             "scanner_done",
             {
                 "leads": len(leads),
-                "summary": _scanners.summarize_for_report(leads),
+                "summary": summary,
                 "tools": [
                     {"name": info.name, "available": info.available, "leads": info.leads}
                     for info in result["scanners"]

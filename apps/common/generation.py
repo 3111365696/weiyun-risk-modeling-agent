@@ -24,6 +24,7 @@ from stride_gpt.core.test_cases import generate_test_cases
 from stride_gpt.core.threat_model import generate_threat_model
 from stride_gpt.models import PROVIDERS, get_models_for_provider
 
+from . import logging_setup as _logging
 from . import standards as _standards
 from . import store
 from . import usage as _usage
@@ -145,12 +146,52 @@ def build_prompt(kind: str, profile: dict, description: str, threats_md: str = "
     raise GenerationError(f"未知的产物类型：{kind}")
 
 
+_log = _logging.get_logger("generation")
+
+
 def run_generation(
     kind: str, prompt: str, settings: dict, *, context: dict | None = None
 ) -> tuple[str, dict | None]:
     """调用模型生成一类产物，返回 (markdown, json_data)；同时记录用量。"""
     apply_policies()
     config = build_llm_config(settings)
+    import time as _time
+
+    started = _time.perf_counter()
+    _log.info(
+        "开始生成",
+        extra={
+            "kind": kind,
+            "provider": settings.get("provider", ""),
+            "model": settings.get("model", ""),
+            "prompt_chars": len(prompt or ""),
+        },
+    )
+    try:
+        return _run_generation_inner(kind, prompt, config, settings)
+    except Exception as exc:
+        _log.error(
+            "生成失败",
+            exc_info=exc,
+            extra={
+                "kind": kind,
+                "provider": settings.get("provider", ""),
+                "model": settings.get("model", ""),
+                "ms": round((_time.perf_counter() - started) * 1000, 1),
+            },
+        )
+        raise
+    finally:
+        _log.info(
+            "生成结束",
+            extra={
+                "kind": kind,
+                "ms": round((_time.perf_counter() - started) * 1000, 1),
+            },
+        )
+
+
+def _run_generation_inner(kind: str, prompt: str, config, settings: dict) -> tuple[str, dict | None]:
     if kind == "threat_model":
         parsed, _resp = generate_threat_model(config, prompt)
         md = json_to_markdown(parsed.threat_model, parsed.improvement_suggestions)
