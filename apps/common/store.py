@@ -356,6 +356,9 @@ def init_db() -> None:
         _ensure_column(c, "threats", "source", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(c, "threats", "evidence", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(c, "threats", "cwe", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(c, "api_keys", "scopes", "TEXT NOT NULL DEFAULT 'read,write'")
+        _ensure_column(c, "api_keys", "expires_at", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(c, "api_keys", "owner", "TEXT NOT NULL DEFAULT ''")
         for ddl in (
             "CREATE INDEX IF NOT EXISTS idx_reports_project ON reports(project)",
             "CREATE INDEX IF NOT EXISTS idx_reports_kind ON reports(kind)",
@@ -966,42 +969,130 @@ def _hash_api_key(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
-def create_api_key(name: str) -> str:
-    """创建 API Key，返回明文（仅此一次可见）。"""
+API_SCOPES = ("read", "write")
+
+
+def normalize_scopes(scopes) -> str:
+    """规范化作用域：逗号分隔、去重、只允许 read/write，默认两者都有。"""
+    if isinstance(scopes, str):
+        items = [item.strip() for item in scopes.split(",")]
+    else:
+        items = [str(item).strip() for item in (scopes or [])]
+    valid = [item for item in API_SCOPES if item in items]
+    return ",".join(valid) if valid else "read,write"
+
+
+def create_api_key(
+    name: str,
+    *,
+    scopes=("read", "write"),
+    expires_days: int = 0,
+    owner: str = "",
+) -> str:
+    """创建 API Key，返回明文（仅此一次可见）。
+
+    expires_days=0 表示永不过期；作用域 read=只读、write=可写（生成/更新/删除）。
+    """
     init_db()
     plain = API_KEY_PREFIX + base64.urlsafe_b64encode(os.urandom(24)).decode("ascii").rstrip("=")
+    expires_at = ""
+    if int(expires_days or 0) > 0:
+        expires_at = (datetime.now() + timedelta(days=int(expires_days))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
     with _conn() as c:
         c.execute(
-            "INSERT INTO api_keys(name, key_hash, enabled, created_at, last_used_at)"
-            " VALUES(?, ?, 1, ?, '')",
-            (name or "未命名", _hash_api_key(plain), _now()),
+            "INSERT INTO api_keys(name, key_hash, enabled, created_at, last_used_at, scopes, expires_at, owner)"
+            " VALUES(?, ?, 1, ?, '', ?, ?, ?)",
+            (
+                name or "未命名",
+                _hash_api_key(plain),
+                _now(),
+                normalize_scopes(scopes),
+                expires_at,
+                owner or "",
+            ),
+        )
+    return plain
+
+
+def _api_key_expired(row) -> bool:
+    expires_at = str(row["expires_at"] or "") if "expires_at" in row.keys() else ""  # noqa: SIM118 —— sqlite3.Row 不支持 in
+    if not expires_at:
+        return False
+    try:
+        return datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S") < datetime.now()
+    except ValueError:
+        return False
+
+
+def verify_api_key_full(key: str | None) -> dict | None:
+    """校验 API Key；有效返回 {id, name, scopes, expires_at, owner} 并刷新 last_used_at。"""
+    if not key:
+        return None
+    init_db()
+    with _conn() as c:
+        row = c.execute("SELECT * FROM api_keys WHERE key_hash = ?", (_hash_api_key(key),)).fetchone()
+        if not row or not row["enabled"]:
+            return None
+        if _api_key_expired(row):
+            return None
+        c.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (_now(), row["id"]))
+    return {
+        "id": int(row["id"]),
+        "name": str(row["name"]),
+        "scopes": normalize_scopes(row["scopes"] if "scopes" in row.keys() else "read,write"),  # noqa: SIM118 —— sqlite3.Row 不支持 in
+        "expires_at": str(row["expires_at"] or "") if "expires_at" in row.keys() else "",  # noqa: SIM118 —— sqlite3.Row 不支持 in
+        "owner": str(row["owner"] or "") if "owner" in row.keys() else "",  # noqa: SIM118 —— sqlite3.Row 不支持 in
+    }
+
+
+def rotate_api_key(key_id: int) -> str | None:
+    """轮换密钥：保持名称/作用域/到期时间，返回新明文（仅一次可见）。"""
+    init_db()
+    with _conn() as c:
+        row = c.execute("SELECT * FROM api_keys WHERE id = ?", (key_id,)).fetchone()
+        if not row:
+            return None
+        plain = API_KEY_PREFIX + base64.urlsafe_b64encode(os.urandom(24)).decode("ascii").rstrip("=")
+        c.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
+        c.execute(
+            "INSERT INTO api_keys(name, key_hash, enabled, created_at, last_used_at, scopes, expires_at, owner,"
+            " daily_token_limit, monthly_cost_limit)"
+            " VALUES(?, ?, 1, ?, '', ?, ?, ?, ?, ?)",
+            (
+                row["name"],
+                _hash_api_key(plain),
+                _now(),
+                normalize_scopes(row["scopes"] if "scopes" in row.keys() else "read,write"),  # noqa: SIM118 —— sqlite3.Row 不支持 in
+                str(row["expires_at"] or "") if "expires_at" in row.keys() else "",  # noqa: SIM118 —— sqlite3.Row 不支持 in
+                str(row["owner"] or "") if "owner" in row.keys() else "",  # noqa: SIM118 —— sqlite3.Row 不支持 in
+                int(row["daily_token_limit"] or 0) if "daily_token_limit" in row.keys() else 0,  # noqa: SIM118 —— sqlite3.Row 不支持 in
+                float(row["monthly_cost_limit"] or 0) if "monthly_cost_limit" in row.keys() else 0.0,  # noqa: SIM118 —— sqlite3.Row 不支持 in
+            ),
         )
     return plain
 
 
 def verify_api_key(key: str | None) -> str | None:
-    """校验 API Key；有效则返回名称并刷新 last_used_at。"""
-    if not key:
-        return None
-    init_db()
-    with _conn() as c:
-        row = c.execute(
-            "SELECT id, name, enabled FROM api_keys WHERE key_hash = ?",
-            (_hash_api_key(key),),
-        ).fetchone()
-        if not row or not row["enabled"]:
-            return None
-        c.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (_now(), row["id"]))
-    return str(row["name"])
+    """校验 API Key；有效则返回名称并刷新 last_used_at（含过期检查）。"""
+    info = verify_api_key_full(key)
+    return str(info["name"]) if info else None
 
 
 def list_api_keys() -> list[dict]:
     init_db()
     with _conn() as c:
         rows = c.execute(
-            "SELECT id, name, enabled, created_at, last_used_at FROM api_keys ORDER BY id DESC"
+            "SELECT id, name, enabled, created_at, last_used_at, scopes, expires_at, owner,"
+            " daily_token_limit, monthly_cost_limit FROM api_keys ORDER BY id DESC"
         ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for row in rows:
+        item = dict(row)
+        item["expired"] = bool(item.get("expires_at")) and _api_key_expired(row)
+        out.append(item)
+    return out
 
 
 def revoke_api_key(key_id: int) -> None:

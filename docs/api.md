@@ -25,6 +25,9 @@ uv run python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000
 
 ```
 X-API-Key: wy_xxxxxxxxxxxxxxxx
+
+> API Key 支持 `read` / `write` 作用域与有效期：只读密钥仅能调用 GET；
+> 生成/更新/删除需要 write。密钥可在「系统配置 → API 访问」轮换（旧密钥立即失效）。
 ```
 
 密钥在 Web「系统配置 → API 访问」创建，只显示一次；吊销后立即失效。

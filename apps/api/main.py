@@ -26,7 +26,7 @@ for _p in (_REPO_ROOT, _APPS_DIR):
 
 from common import agentic, generation, store, usage  # noqa: E402
 from common import logging_setup as _logging  # noqa: E402
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile  # noqa: E402
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
@@ -104,11 +104,22 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 
-def require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> str:
-    name = store.verify_api_key(x_api_key)
-    if not name:
-        raise HTTPException(status_code=401, detail="无效或已吊销的 API Key")
-    return name
+def require_api_key(
+    request: Request,
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> str:
+    """校验 API Key 并强制作用域：读写之外的请求需要 write 作用域。"""
+    info = store.verify_api_key_full(x_api_key)
+    if not info:
+        raise HTTPException(status_code=401, detail="无效、已过期或已吊销的 API Key")
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        scopes = str(info.get("scopes") or "").split(",")
+        if "write" not in scopes:
+            raise HTTPException(
+                status_code=403,
+                detail="该 API Key 只有只读（read）作用域，无法执行写操作",
+            )
+    return info["name"]
 
 
 class Profile(BaseModel):

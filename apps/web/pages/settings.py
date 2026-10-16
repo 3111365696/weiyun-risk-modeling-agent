@@ -337,6 +337,31 @@ def render_settings() -> None:
             _new_key_name = st.text_input(
                 _t("新密钥名称", "New key name"), key="api_key_name", placeholder=_t("如：CI 流水线", "e.g. CI pipeline")
             )
+            _s1, _s2 = st.columns([1.4, 1])
+            with _s1:
+                _key_scopes = st.multiselect(
+                    _t("作用域", "Scopes"),
+                    options=["read", "write"],
+                    default=["read", "write"],
+                    key="new_key_scopes",
+                    format_func=lambda sc: _t(
+                        {"read": "read（只读）", "write": "write（可写）"}.get(sc, sc),
+                        {"read": "read (read-only)", "write": "write (create/update/delete)"}.get(sc, sc),
+                    ),
+                    help=_t(
+                        "只读密钥只能调用 GET 接口；生成/更新/删除需要 write。",
+                        "Read-only keys may only call GET endpoints; generation/update/delete need write.",
+                    ),
+                )
+            with _s2:
+                _key_expires = st.number_input(
+                    _t("有效期（天，0 = 不过期）", "Valid for (days, 0 = never expires)"),
+                    min_value=0,
+                    max_value=3650,
+                    value=0,
+                    step=30,
+                    key="new_key_expires",
+                )
             _q1, _q2 = st.columns(2)
             with _q1:
                 _key_daily = st.number_input(
@@ -358,7 +383,12 @@ def render_settings() -> None:
                 if not (_new_key_name or "").strip():
                     st.warning(_t("请先填写密钥名称", "Enter a key name first"))
                 else:
-                    st.session_state["_new_api_key"] = store.create_api_key(_new_key_name.strip())
+                    st.session_state["_new_api_key"] = store.create_api_key(
+                        _new_key_name.strip(),
+                        scopes=_key_scopes or ["read"],
+                        expires_days=int(_key_expires),
+                        owner=st.session_state.get("user", ""),
+                    )
                     _new_key_row = store.get_api_key_by_name(_new_key_name.strip())
                     if _new_key_row:
                         store.set_api_key_quota(
@@ -373,23 +403,50 @@ def render_settings() -> None:
                 st.caption(_t("刷新页面后不再显示。", "It will not be shown again after refresh."))
             _keys = store.list_api_keys()
             for _k in _keys:
-                _kc1, _kc2 = st.columns([4, 1], vertical_alignment="center")
+                _kc1, _kc2, _kc3 = st.columns([3.6, 1.15, 1.15], vertical_alignment="center")
                 with _kc1:
-                    _quota_bits = []
+                    _bits = [f"`{_k.get('scopes') or 'read,write'}`"]
+                    if _k.get("expires_at"):
+                        _bits.append(
+                            _t(
+                                f"到期 {_k['expires_at'][:10]}",
+                                f"expires {_k['expires_at'][:10]}",
+                            )
+                            + ("（已过期）" if _k.get("expired") else "")
+                        )
+                    else:
+                        _bits.append(_t("不过期", "no expiry"))
                     if _k.get("daily_token_limit"):
-                        _quota_bits.append(f"{_k['daily_token_limit']:,} tokens/day")
+                        _bits.append(f"{_k['daily_token_limit']:,} tokens/day")
                     if _k.get("monthly_cost_limit"):
-                        _quota_bits.append(f"${_k['monthly_cost_limit']:.2f}/month")
+                        _bits.append(f"${_k['monthly_cost_limit']:.2f}/month")
+                    if _k.get("owner"):
+                        _bits.append(_t(f"创建人 {_k['owner']}", f"owner {_k['owner']}"))
                     st.markdown(
                         f"**{_k['name']}**"
-                        + (f"（{' · '.join(_quota_bits)}）" if _quota_bits else "")
+                        + (f"（{' · '.join(_bits)}）" if _bits else "")
                         + _t("  \n<span class='sg-rep-meta'>创建 ", "  \n<span class='sg-rep-meta'>Created ")
                         + f"{_k['created_at']}"
                         + _t(" · 最近使用 ", " · last used ")
                         + f"{_k['last_used_at'] or '—'}</span>",
                         unsafe_allow_html=True,
                     )
-                with _kc2:
+                with _kc2, st.popover(_t("轮换", "Rotate"), use_container_width=True):
+                    st.caption(
+                        _t(
+                            "轮换会立即废弃当前密钥并生成新密钥（仅显示一次）。",
+                            "Rotation invalidates the current key and issues a new one (shown once).",
+                        )
+                    )
+                    if st.button(_t("确认轮换", "Confirm rotate"), key=f"rotate_btn_{_k['id']}"):
+                        _rotated = store.rotate_api_key(_k["id"])
+                        if _rotated:
+                            st.session_state["_new_api_key"] = _rotated
+                            store.log_action(
+                                st.session_state.get("user", ""), "轮换 API Key", _k["name"]
+                            )
+                            st.rerun()
+                with _kc3:
                     if st.button(_t("吊销", "Revoke"), key=f"revoke_key_{_k['id']}", use_container_width=True):
                         store.revoke_api_key(_k["id"])
                         store.log_action(st.session_state.get("user", ""), "吊销 API Key", _k["name"])
