@@ -1,5 +1,10 @@
 # 威云-风险建模智能体
 
+[![CI](https://github.com/3111365696/weiyun-risk-modeling-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/3111365696/weiyun-risk-modeling-agent/actions/workflows/ci.yml)
+![version](https://img.shields.io/badge/version-1.0.0-7C6BD6)
+![tests](https://img.shields.io/badge/tests-1068%20passed-30A46C)
+![license](https://img.shields.io/badge/license-MIT-blue)
+
 > 面向研发与安全团队的 STRIDE 威胁建模与代码审计平台。从代码库或架构描述出发，
 > 自动产出威胁模型、攻击树、数据流图、缓解措施与 DREAD 风险评估，并提供台账、复核、
 > 报告导出与 REST API，全流程可审计、可备份、可交付。
