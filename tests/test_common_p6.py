@@ -239,6 +239,7 @@ class TestProgressAdapter:
 
 
 class TestApiJobs:
+
     def _load_api(self):
         import importlib
 
@@ -270,11 +271,11 @@ class TestApiJobs:
             max_tool_calls=10,
             zip_bytes=b"zip",
         )
-        for _ in range(50):
-            if api._JOBS[job_id]["status"] != "running":
+        for _ in range(100):
+            if (store.get_job(job_id) or {}).get("status") not in ("queued", "running"):
                 break
             time.sleep(0.05)
-        job = api._job_public(api._JOBS[job_id])
+        job = api._job_public(store.get_job(job_id))
         assert job["status"] == "done"
         assert job["result"]["report_id"] == 7
 
@@ -297,10 +298,10 @@ class TestApiJobs:
             max_tool_calls=10,
             zip_bytes=b"zip",
         )
-        for _ in range(50):
-            if api._JOBS[job_id]["status"] != "running":
+        for _ in range(100):
+            if (store.get_job(job_id) or {}).get("status") not in ("queued", "running"):
                 break
             time.sleep(0.05)
-        job = api._job_public(api._JOBS[job_id])
+        job = api._job_public(store.get_job(job_id))
         assert job["status"] == "failed"
         assert "模型挂了" in job["error"]

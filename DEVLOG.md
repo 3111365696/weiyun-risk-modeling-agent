@@ -370,3 +370,36 @@ Python 看到函数内存在对 `_t` 的赋值就把它当作局部变量，于�
   记录时用量表格正常渲染
 - 已验证该测试在修复前必然失败（NameError）、修复后通过
 - 942 passed，ruff 全绿
+
+## P7 工程化底座
+
+### P7-1 结构化日志 + 全局错误边界
+- `common/logging_setup.py`：JSON 行日志（ts/level/logger/msg/pid/thread + 上下文字段 +
+  异常堆栈），单文件 5MB×5 轮转，写入 `~/.stride-gpt/logs/<组件>.jsonl`
+- 上下文用 contextvars（trace/user/source/project…）：每个请求/页面重跑/任务线程独立，
+  线程之间不串号；`recent_errors()` / `log_files()` 供状态页使用
+- `web/error_boundary.py`：页面异常 → 友好错误卡片 + `ERR-XXXXXX` 编号 + 结构化日志 +
+  审计日志；管理员可展开堆栈，普通用户只看编号；RerunException/StopException 原样透传
+- API：请求追踪中间件（X-Request-ID、访问日志含耗时/状态码）+ 未处理异常返回 error_id
+- scheduler：结构化日志 + 每计划 trace + 单计划失败不中断循环
+
+### P7-2 SQLite 硬化
+- `_conn()` 改为上下文管理器（原先连接从不关闭）：提交/回滚/必关闭
+- WAL + busy_timeout=30s + synchronous=NORMAL + temp_store=MEMORY：Web/API/调度器并发写不再锁库
+- 12 个索引（报告/威胁/审计/用量/计划/任务）
+- `store.db_stats()`：文件与 WAL 大小、journal 模式、各表行数
+
+### P7-3 关键链路日志
+- 生成：开始/结束/失败（kind/provider/model/prompt 长度/耗时毫秒）
+- 静态分析：开始/完成/失败（线索数、按工具统计）
+
+### P7-4 任务持久化（jobs 表）
+- `jobs` 表：状态机 queued→running→done/failed/cancelled/interrupted，参数/结果/进度持久化
+- 重启恢复：启动时把 running/queued 标记为 `interrupted`（附「可重跑」提示）
+- 重跑：`POST /api/v1/code-audit/jobs/{id}/retry`（复用参数与 ZIP 产物；令牌不落库）
+- 取消：协作式取消标志落库；已完成任务 DELETE 改为删除记录并清理上传产物
+- 安全：仓库令牌只驻内存；上传 ZIP ≤200MB；任务历史自动裁剪（保留 200 条）
+
+### 验证
+- 新增 52 个测试（日志 13、错误边界 6、API 追踪 4、SQLite 硬化 9、任务持久化 14 等）
+- 988 passed，ruff 全绿

@@ -9,11 +9,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import threading
 import uuid
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -551,12 +551,32 @@ def api_push_webhooks(name: str, api_key_name: str = Depends(require_api_key)) -
 
 
 # ---------------------------------------------------------------------------
-# 代码审计任务（后台线程 + 进度）
+# 代码审计任务（后台线程 + 数据库持久化，重启不丢；可取消 / 可重跑）
 # ---------------------------------------------------------------------------
 
-_JOBS: dict[str, dict] = {}
-_JOBS_LOCK = threading.Lock()
-_MAX_JOBS = 50
+_MAX_JOBS = 200
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 单个 ZIP 上限，同时限制持久化任务产物体积
+_TOKENS: dict[str, str] = {}  # 仓库令牌只驻内存，绝不落库
+
+
+def _recover_jobs() -> int:
+    """进程启动：上次中断的任务标记为 interrupted。"""
+    try:
+        return store.recover_interrupted_jobs()
+    except Exception:  # pragma: no cover - 恢复失败不应阻止服务启动
+        _log.exception("任务恢复失败")
+        return 0
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    recovered = _recover_jobs()
+    if recovered:
+        _log.warning("检测到中断的任务", extra={"count": recovered})
+    yield
+
+
+app.router.lifespan_context = _lifespan
 
 
 def _job_public(job: dict) -> dict:
@@ -566,10 +586,10 @@ def _job_public(job: dict) -> dict:
         "project": job["project"],
         "source": job["source"],
         "created_at": job["created_at"],
-        "finished_at": job.get("finished_at"),
-        "error": job.get("error"),
-        "result": job.get("result"),
-        "progress": job.get("progress", [])[-30:],
+        "finished_at": job.get("finished_at") or None,
+        "error": job.get("error") or "",
+        "result": job.get("result") or {},
+        "progress": (job.get("progress") or [])[-30:],
     }
 
 
@@ -585,86 +605,116 @@ def _start_job(
     max_tool_calls: int,
     enable_scanners: bool = True,
     zip_bytes: bytes | None = None,
+    zip_artifact: str | None = None,
     repo_url: str | None = None,
     token: str | None = None,
 ) -> str:
     job_id = uuid.uuid4().hex[:12]
-    job = {
-        "job_id": job_id,
-        "status": "running",
-        "project": project,
-        "source": source,
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "progress": [],
-        "cancel_requested": False,
-    }
-    with _JOBS_LOCK:
-        _JOBS[job_id] = job
-        # 只保留最近的任务
-        while len(_JOBS) > _MAX_JOBS:
-            for old_id, old in list(_JOBS.items()):
-                if old["status"] != "running":
-                    _JOBS.pop(old_id, None)
-                    break
-            else:
-                break
+    artifact = ""
+    if zip_bytes is not None:
+        path = store.jobs_dir() / f"{job_id}.zip"
+        path.write_bytes(zip_bytes)
+        artifact = str(path)
+    elif zip_artifact:
+        origin = Path(zip_artifact)
+        if not origin.exists():
+            raise HTTPException(status_code=410, detail="上传文件已被清理，请重新上传后再重跑")
+        path = store.jobs_dir() / f"{job_id}.zip"
+        path.write_bytes(origin.read_bytes())
+        artifact = str(path)
 
-    def _event(kind: str, payload: dict) -> None:
-        with _JOBS_LOCK:
-            job["progress"].append({"kind": kind, **payload})
+    store.create_job(
+        job_id,
+        kind="code_audit",
+        project=project,
+        source=source,
+        params={
+            "description": description,
+            "worker_model": worker_model,
+            "architect_model": architect_model,
+            "max_llm_calls": max_llm_calls,
+            "max_tool_calls": max_tool_calls,
+            "enable_scanners": enable_scanners,
+            "repo_url": (repo_url or "").strip(),
+        },
+        artifact=artifact,
+    )
+    store.prune_jobs(keep=_MAX_JOBS)
+    if token:
+        _TOKENS[job_id] = token
+    threading.Thread(
+        target=_run_job, args=(job_id, api_key_name), name=f"code-audit-{job_id}", daemon=True
+    ).start()
+    return job_id
 
-    def _cancel_check() -> bool:
-        return bool(job.get("cancel_requested"))
 
-    def _worker() -> None:
+def _run_job(job_id: str, api_key_name: str) -> None:
+    job = store.get_job(job_id)
+    if not job:
+        return
+    params = job.get("params") or {}
+    project = job["project"]
+    source = job["source"]
+    token = _TOKENS.pop(job_id, "")
+    trace = _logging.new_trace("job")
+    with _logging.bound(trace=trace, job_id=job_id, project=project):
+        store.job_set_running(job_id)
         usage.set_call_context(actor=f"api:{api_key_name}", source="api", project=project)
+        _log.info("审计任务开始", extra={"source": source, "project": project})
+
+        def _event(kind: str, payload: dict) -> None:
+            store.job_append_event(job_id, {"kind": kind, **payload})
+
+        def _cancel_check() -> bool:
+            return store.job_cancel_requested(job_id)
+
         try:
             models = agentic.build_model_pair(
-                worker_model=worker_model, architect_model=architect_model
+                worker_model=params.get("worker_model"),
+                architect_model=params.get("architect_model"),
             )
             common = {
                 "project": project,
-                "description": description,
+                "description": params.get("description", ""),
                 "models": models,
-                "max_llm_calls": max_llm_calls,
-                "max_tool_calls": max_tool_calls,
-                "enable_scanners": enable_scanners,
+                "max_llm_calls": int(params.get("max_llm_calls") or 0),
+                "max_tool_calls": int(params.get("max_tool_calls") or 0),
+                "enable_scanners": bool(params.get("enable_scanners", True)),
                 "on_event": _event,
                 "cancel_check": _cancel_check,
             }
-            if zip_bytes is not None:
-                result = agentic.audit_zip(zip_bytes, **common)
+            if source == "zip":
+                artifact = Path(job.get("artifact") or "")
+                if not artifact.exists():
+                    raise agentic.AgenticError("上传文件已丢失，无法继续（请重新提交）")
+                result = agentic.audit_zip(artifact.read_bytes(), **common)
             else:
-                result = agentic.audit_repo(repo_url or "", token=token, **common)
-            with _JOBS_LOCK:
-                job.update(
-                    status="done",
-                    finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    result={
-                        "report_id": result["report_id"],
-                        "threats_inserted": result["threats_inserted"],
-                        "threats_total": result["threats_total"],
-                        "run_status": result["status"],
-                        "scanner_summary": result.get("scanner_summary") or {"total": 0},
-                    },
-                    summary=result["markdown"][:2000],
-                )
+                result = agentic.audit_repo(str(params.get("repo_url") or ""), token=token, **common)
+            store.job_finish(
+                job_id,
+                "done",
+                result={
+                    "report_id": result["report_id"],
+                    "threats_inserted": result["threats_inserted"],
+                    "threats_total": result["threats_total"],
+                    "run_status": result["status"],
+                    "scanner_summary": result.get("scanner_summary") or {"total": 0},
+                },
+                summary=result["markdown"][:2000],
+            )
+            _log.info(
+                "审计任务完成",
+                extra={
+                    "report_id": result["report_id"],
+                    "threats_inserted": result["threats_inserted"],
+                },
+            )
         except agentic.AgenticCancelledError:
-            with _JOBS_LOCK:
-                job.update(
-                    status="cancelled",
-                    finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                )
+            store.job_finish(job_id, "cancelled")
+            _log.info("审计任务已取消")
         except Exception as exc:
-            with _JOBS_LOCK:
-                job.update(
-                    status="failed",
-                    finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    error=f"{type(exc).__name__}: {exc}",
-                )
-
-    threading.Thread(target=_worker, name=f"code-audit-{job_id}", daemon=True).start()
-    return job_id
+            _log.error("审计任务失败", exc_info=exc)
+            store.job_finish(job_id, "failed", error=f"{type(exc).__name__}: {exc}")
 
 
 @app.post("/api/v1/code-audit", summary="提交代码审计任务（Git 仓库）", status_code=202)
@@ -686,7 +736,7 @@ def api_code_audit(
         repo_url=body.repo_url.strip(),
         token=body.token,
     )
-    return {"ok": True, "job_id": job_id, "project": project, "status": "running"}
+    return {"ok": True, "job_id": job_id, "project": project, "status": "queued"}
 
 
 @app.post("/api/v1/code-audit/upload", summary="提交代码审计任务（ZIP 上传）", status_code=202)
@@ -705,6 +755,11 @@ def api_code_audit_upload(
     data = file.file.read()
     if not data:
         raise HTTPException(status_code=400, detail="上传文件为空")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"ZIP 超过上限 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB，请拆分后再传",
+        )
     job_id = _start_job(
         source="zip",
         project=project.strip() or (file.filename or "upload").removesuffix(".zip"),
@@ -717,13 +772,12 @@ def api_code_audit_upload(
         enable_scanners=enable_scanners,
         zip_bytes=data,
     )
-    return {"ok": True, "job_id": job_id, "status": "running"}
+    return {"ok": True, "job_id": job_id, "status": "queued"}
 
 
-@app.get("/api/v1/code-audit/jobs", summary="代码审计任务列表")
+@app.get("/api/v1/code-audit/jobs", summary="代码审计任务列表（持久化）")
 def api_code_audit_jobs(api_key_name: str = Depends(require_api_key)) -> dict:
-    with _JOBS_LOCK:
-        jobs = [_job_public(job) for job in reversed(list(_JOBS.values()))]
+    jobs = [_job_public(job) for job in store.list_jobs(limit=50, kind="code_audit")]
     for job in jobs:
         job.pop("progress", None)
     return {"ok": True, "count": len(jobs), "jobs": jobs}
@@ -731,22 +785,48 @@ def api_code_audit_jobs(api_key_name: str = Depends(require_api_key)) -> dict:
 
 @app.get("/api/v1/code-audit/jobs/{job_id}", summary="代码审计任务详情")
 def api_code_audit_job(job_id: str, api_key_name: str = Depends(require_api_key)) -> dict:
-    with _JOBS_LOCK:
-        job = _JOBS.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="任务不存在")
-        return {"ok": True, **_job_public(job)}
+    job = store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {"ok": True, **_job_public(job)}
 
 
-@app.delete("/api/v1/code-audit/jobs/{job_id}", summary="取消代码审计任务")
+@app.delete("/api/v1/code-audit/jobs/{job_id}", summary="取消运行中任务 / 删除历史任务")
 def api_code_audit_cancel(job_id: str, api_key_name: str = Depends(require_api_key)) -> dict:
-    with _JOBS_LOCK:
-        job = _JOBS.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="任务不存在")
-        if job["status"] == "running":
-            job["cancel_requested"] = True
-    return {"ok": True, "job_id": job_id, "status": job["status"]}
+    job = store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if job["status"] in ("queued", "running"):
+        store.job_request_cancel(job_id)
+        return {"ok": True, "job_id": job_id, "status": "cancelling"}
+    deleted = store.delete_job(job_id)
+    return {"ok": bool(deleted), "job_id": job_id, "status": "deleted"}
+
+
+@app.post("/api/v1/code-audit/jobs/{job_id}/retry", summary="重跑已完成/失败的任务", status_code=202)
+def api_code_audit_retry(job_id: str, api_key_name: str = Depends(require_api_key)) -> dict:
+    job = store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if job["status"] in ("queued", "running"):
+        raise HTTPException(status_code=409, detail="任务仍在运行，无需重跑")
+    _enforce_quota(api_key_name)
+    params = job.get("params") or {}
+    new_id = _start_job(
+        source=job["source"],
+        project=job["project"],
+        description=params.get("description", ""),
+        api_key_name=api_key_name,
+        worker_model=params.get("worker_model"),
+        architect_model=params.get("architect_model"),
+        max_llm_calls=int(params.get("max_llm_calls") or 0),
+        max_tool_calls=int(params.get("max_tool_calls") or 0),
+        enable_scanners=bool(params.get("enable_scanners", True)),
+        zip_artifact=job.get("artifact") or None,
+        repo_url=params.get("repo_url"),
+        token=_TOKENS.get(job_id),
+    )
+    return {"ok": True, "job_id": new_id, "retry_of": job_id, "status": "queued"}
 
 
 # ---------------------------------------------------------------------------

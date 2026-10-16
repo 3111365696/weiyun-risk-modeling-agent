@@ -218,9 +218,15 @@ curl -sS -X POST "http://localhost:8000/api/v1/schedules" -H "X-API-Key: $WY_API
 
 > 代码审计支持 `enable_scanners`（默认 `true`）：先跑本机 Semgrep/Bandit/detect-secrets 等
 > 产出候选线索，再交给模型逐条核实；任务 `result` 含 `scanner_summary`（按工具/严重度统计）。
+
+> **任务持久化（P7）**：任务与进度写入数据库，服务重启不丢——重启时仍在运行的任务会被标记
+> 为 `interrupted`（可 `retry` 重跑）。ZIP 上传的产物保存在 `~/.stride-gpt/jobs/`（上限 200MB），
+> 因此可重跑；仓库访问令牌只驻内存、绝不落库，重启后重跑私有仓库需重新提交令牌。
+> 每个请求都有 `X-Request-ID`（可用请求头传入自定义值），排障时凭它检索日志。
 | GET | `/api/v1/code-audit/jobs` | 任务列表（最近 50 个） |
 | GET | `/api/v1/code-audit/jobs/{job_id}` | 任务详情：`status`（running/done/failed/cancelled）、`progress`（最近 30 条事件）、`result` |
-| DELETE | `/api/v1/code-audit/jobs/{job_id}` | 请求取消（协作式：下一次进度回调时中止） |
+| DELETE | `/api/v1/code-audit/jobs/{job_id}` | 运行中 → 请求取消（协作式）；已结束 → 删除记录与上传产物 |
+| POST | `/api/v1/code-audit/jobs/{job_id}/retry` | 重跑已结束任务（复用参数与上传产物，返回新 job_id） |
 
 ```bash
 # 提交 ZIP

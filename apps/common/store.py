@@ -314,6 +314,27 @@ def init_db() -> None:
             )
             """
         )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL DEFAULT 'code_audit',
+                status TEXT NOT NULL DEFAULT 'queued',
+                project TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                params TEXT NOT NULL DEFAULT '{}',
+                artifact TEXT NOT NULL DEFAULT '',
+                result TEXT NOT NULL DEFAULT '{}',
+                progress TEXT NOT NULL DEFAULT '[]',
+                summary TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT '',
+                started_at TEXT NOT NULL DEFAULT '',
+                finished_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         # 增量迁移（老库补列）——必须放在所有建表之后
         _ensure_column(c, "api_keys", "daily_token_limit", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(c, "api_keys", "monthly_cost_limit", "REAL NOT NULL DEFAULT 0")
@@ -338,6 +359,8 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_log(ts)",
             "CREATE INDEX IF NOT EXISTS idx_usage_project ON usage_log(project)",
             "CREATE INDEX IF NOT EXISTS idx_schedules_enabled ON schedules(enabled)",
+            "CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)",
         ):
             c.execute(ddl)
 
@@ -1129,6 +1152,198 @@ def set_user_password(username: str, password: str) -> None:
             "UPDATE users SET password_hash = ?, salt = ? WHERE username = ?",
             (pw_hash, salt, username),
         )
+
+
+# ---------------------------------------------------------------------------
+# 后台任务（P7：持久化，重启不丢；服务重启后 running 会被标记为 interrupted）
+# ---------------------------------------------------------------------------
+
+JOB_STATUSES = ("queued", "running", "done", "failed", "cancelled", "interrupted")
+
+
+def jobs_dir() -> Path:
+    """任务上传产物目录（用于补跑 ZIP 任务）。"""
+    target = DATA_DIR / "jobs"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _json_load(text, default):
+    try:
+        return json.loads(text) if text else default
+    except (TypeError, ValueError):
+        return default
+
+
+def create_job(
+    job_id: str,
+    *,
+    kind: str = "code_audit",
+    project: str = "",
+    source: str = "",
+    params: dict | None = None,
+    artifact: str = "",
+) -> None:
+    init_db()
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO jobs(id, kind, status, project, source, params, artifact, created_at) "
+            "VALUES(?, ?, 'queued', ?, ?, ?, ?, ?)",
+            (
+                job_id,
+                kind,
+                project or "",
+                source or "",
+                json.dumps(params or {}, ensure_ascii=False),
+                artifact or "",
+                _now(),
+            ),
+        )
+
+
+def job_set_running(job_id: str) -> None:
+    with _conn() as c:
+        c.execute(
+            "UPDATE jobs SET status='running', started_at=? "
+            "WHERE id=? AND status IN ('queued','interrupted')",
+            (_now(), job_id),
+        )
+
+
+def job_append_event(job_id: str, event: dict, *, limit: int = 30) -> None:
+    """追加进度事件（只保留最近 limit 条，避免行无限增长）。"""
+    with _conn() as c:
+        row = c.execute("SELECT progress FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            return
+        events = _json_load(row["progress"], [])
+        events.append(event)
+        c.execute(
+            "UPDATE jobs SET progress=? WHERE id=?",
+            (json.dumps(events[-limit:], ensure_ascii=False), job_id),
+        )
+
+
+def job_finish(
+    job_id: str,
+    status: str,
+    *,
+    result: dict | None = None,
+    error: str = "",
+    summary: str = "",
+) -> None:
+    if status not in JOB_STATUSES:
+        raise ValueError(f"未知任务状态：{status}")
+    with _conn() as c:
+        c.execute(
+            "UPDATE jobs SET status=?, finished_at=?, result=?, error=?, summary=? WHERE id=?",
+            (
+                status,
+                _now(),
+                json.dumps(result or {}, ensure_ascii=False),
+                error or "",
+                (summary or "")[:4000],
+                job_id,
+            ),
+        )
+
+
+def job_request_cancel(job_id: str) -> bool:
+    """请求取消：置标志位，工作线程在下一个回调处退出。"""
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE jobs SET cancel_requested=1 WHERE id=? AND status IN ('queued','running')",
+            (job_id,),
+        )
+        return cur.rowcount > 0
+
+
+def job_cancel_requested(job_id: str) -> bool:
+    with _conn() as c:
+        row = c.execute("SELECT cancel_requested FROM jobs WHERE id=?", (job_id,)).fetchone()
+    return bool(row and row["cancel_requested"])
+
+
+def _job_row_to_dict(row, *, with_progress: bool = True) -> dict:
+    job = dict(row)
+    job["job_id"] = job.pop("id")
+    job["params"] = _json_load(job.get("params"), {})
+    job["result"] = _json_load(job.get("result"), {})
+    progress = _json_load(job.get("progress"), [])
+    if with_progress:
+        job["progress"] = progress
+    else:
+        job.pop("progress", None)
+        job["event_count"] = len(progress)
+    job["cancel_requested"] = bool(job.get("cancel_requested"))
+    return job
+
+
+def get_job(job_id: str) -> dict | None:
+    init_db()
+    with _conn() as c:
+        row = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    return _job_row_to_dict(row) if row else None
+
+
+def list_jobs(limit: int = 50, *, kind: str | None = None) -> list[dict]:
+    init_db()
+    with _conn() as c:
+        if kind:
+            rows = c.execute(
+                "SELECT * FROM jobs WHERE kind=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (kind, limit),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)
+            ).fetchall()
+    return [_job_row_to_dict(row, with_progress=False) for row in rows]
+
+
+def delete_job(job_id: str) -> bool:
+    with _conn() as c:
+        cur = c.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+        deleted = cur.rowcount > 0
+    artifact = jobs_dir() / f"{job_id}.zip"
+    if deleted and artifact.exists():
+        with contextlib.suppress(OSError):
+            artifact.unlink()
+    return deleted
+
+
+def recover_interrupted_jobs() -> int:
+    """进程启动时调用：把上次崩溃/重启时仍在运行的任务标记为 interrupted。"""
+    init_db()
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE jobs SET status='interrupted', finished_at=?, "
+            "error=CASE WHEN error='' THEN '服务重启，任务中断；可重跑' ELSE error END "
+            "WHERE status IN ('queued', 'running')",
+            (_now(),),
+        )
+        return cur.rowcount
+
+
+def prune_jobs(keep: int = 200) -> int:
+    """只保留最近 keep 条已完成任务（运行中的不删）。"""
+    init_db()
+    removed = 0
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id, artifact FROM jobs WHERE status NOT IN ('queued','running') "
+            "ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?",
+            (keep,),
+        ).fetchall()
+        for row in rows:
+            c.execute("DELETE FROM jobs WHERE id=?", (row["id"],))
+            removed += 1
+            if row["artifact"]:
+                with contextlib.suppress(OSError):
+                    path = Path(row["artifact"])
+                    if path.exists():
+                        path.unlink()
+    return removed
 
 
 def db_stats() -> dict:
