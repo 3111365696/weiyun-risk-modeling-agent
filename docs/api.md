@@ -46,6 +46,8 @@ X-API-Key: wy_xxxxxxxxxxxxxxxx
 | GET | `/api/v1/reports/{id}` | 报告详情 |
 | DELETE | `/api/v1/reports/{id}` | 删除报告 |
 | GET | `/api/v1/reports/{id}/sarif` | 导出威胁模型的 SARIF（CI 用） |
+| GET | `/api/v1/reports/{id}/stix` | 导出 STIX 2.1（威胁模型 / 代码审计） |
+| GET | `/api/v1/reports/{id}/threat-dragon` | 导出为 OWASP Threat Dragon 模型 JSON |
 | GET | `/api/v1/projects` | 项目列表（含统计） |
 | GET | `/api/v1/projects/{name}/threats` | 项目威胁台账 |
 | PATCH | `/api/v1/threats/{id}` | 更新台账条目（status/owner/note） |
@@ -213,6 +215,9 @@ curl -sS -X POST "http://localhost:8000/api/v1/schedules" -H "X-API-Key: $WY_API
 |------|------|------|
 | POST | `/api/v1/code-audit` | 提交 Git 仓库审计（JSON：`repo_url`、`project`、`worker_model`、`max_llm_calls`、`token`…）→ `202 {job_id}` |
 | POST | `/api/v1/code-audit/upload` | 提交 ZIP 审计（multipart：`file` + `project` 等表单字段） |
+
+> 代码审计支持 `enable_scanners`（默认 `true`）：先跑本机 Semgrep/Bandit/detect-secrets 等
+> 产出候选线索，再交给模型逐条核实；任务 `result` 含 `scanner_summary`（按工具/严重度统计）。
 | GET | `/api/v1/code-audit/jobs` | 任务列表（最近 50 个） |
 | GET | `/api/v1/code-audit/jobs/{job_id}` | 任务详情：`status`（running/done/failed/cancelled）、`progress`（最近 30 条事件）、`result` |
 | DELETE | `/api/v1/code-audit/jobs/{job_id}` | 请求取消（协作式：下一次进度回调时中止） |
