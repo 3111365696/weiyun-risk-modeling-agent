@@ -49,6 +49,8 @@ PERSIST_KEYS = [
     "report_brand",
     "report_footer",
     "ui_language",
+    "verify_threats",
+    "monthly_budget",
     *sorted(SENSITIVE_KEYS),
 ]
 
@@ -216,6 +218,26 @@ def init_db() -> None:
         )
         c.execute(
             """
+            CREATE TABLE IF NOT EXISTS usage_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL DEFAULT '',
+                actor TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'web',
+                provider TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL DEFAULT '',
+                project TEXT NOT NULL DEFAULT '',
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER,
+                cost REAL
+            )
+            """
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_log(ts)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_usage_actor ON usage_log(actor)")
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS schedules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project TEXT NOT NULL DEFAULT '',
@@ -271,6 +293,20 @@ def init_db() -> None:
             )
             """
         )
+        # 增量迁移（老库补列）——必须放在所有建表之后
+        _ensure_column(c, "api_keys", "daily_token_limit", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(c, "api_keys", "monthly_cost_limit", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(c, "threats", "verdict", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(c, "threats", "confidence", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(c, "threats", "verification_note", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(c, "threats", "verified_at", "TEXT NOT NULL DEFAULT ''")
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """老库增量迁移：列不存在时补上。"""
+    cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def save_report(
@@ -1148,3 +1184,189 @@ def text_webhook_payload(kind: str, title: str, text: str) -> dict:
     if kind in ("wecom", "dingtalk"):
         return {"msgtype": "text", "text": {"content": body}}
     return {"event": "notification", "title": title, "text": text}
+
+
+# ---------------------------------------------------------------------------
+# 用量与成本
+# ---------------------------------------------------------------------------
+
+
+def log_usage(
+    *,
+    actor: str = "",
+    source: str = "web",
+    provider: str = "",
+    model: str = "",
+    kind: str = "",
+    project: str = "",
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    cost: float | None = None,
+) -> int:
+    """记录一次模型调用的用量与估算成本。"""
+    init_db()
+    total = None
+    if prompt_tokens is not None or completion_tokens is not None:
+        total = int(prompt_tokens or 0) + int(completion_tokens or 0)
+    with _conn() as c:
+        cur = c.execute(
+            """
+            INSERT INTO usage_log
+                (ts, actor, source, provider, model, kind, project,
+                 prompt_tokens, completion_tokens, total_tokens, cost)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _now(),
+                actor or "",
+                source or "web",
+                provider or "",
+                model or "",
+                kind or "",
+                project or "",
+                prompt_tokens,
+                completion_tokens,
+                total,
+                cost,
+            ),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def usage_rows(since: str | None = None, until: str | None = None) -> list[dict]:
+    """按时间范围取用量明细（ts 为 'YYYY-mm-dd HH:MM:SS'，字符串比较即可）。"""
+    init_db()
+    sql = "SELECT * FROM usage_log"
+    params: list = []
+    if since or until:
+        clauses = []
+        if since:
+            clauses.append("ts >= ?")
+            params.append(since)
+        if until:
+            clauses.append("ts <= ?")
+            params.append(until)
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY id DESC"
+    with _conn() as c:
+        return [dict(r) for r in c.execute(sql, params).fetchall()]
+
+
+def usage_summary(since: str | None = None, until: str | None = None) -> dict:
+    """汇总：总量 + 按模型/项目/用户/来源分组。"""
+    rows = usage_rows(since, until)
+    totals = {"calls": len(rows), "prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0, "cost_known": False}
+    groups: dict[str, dict[str, dict]] = {"model": {}, "project": {}, "actor": {}, "source": {}}
+    for row in rows:
+        totals["prompt_tokens"] += int(row.get("prompt_tokens") or 0)
+        totals["completion_tokens"] += int(row.get("completion_tokens") or 0)
+        if row.get("cost") is not None:
+            totals["cost"] += float(row["cost"])
+            totals["cost_known"] = True
+        for field, key in (
+            ("model", row.get("model") or "未知"),
+            ("project", row.get("project") or "未命名"),
+            ("actor", row.get("actor") or "匿名"),
+            ("source", row.get("source") or "web"),
+        ):
+            bucket = groups[field].setdefault(
+                key, {"calls": 0, "tokens": 0, "cost": 0.0, "cost_known": False}
+            )
+            bucket["calls"] += 1
+            bucket["tokens"] += int(row.get("prompt_tokens") or 0) + int(
+                row.get("completion_tokens") or 0
+            )
+            if row.get("cost") is not None:
+                bucket["cost"] += float(row["cost"])
+                bucket["cost_known"] = True
+    totals["total_tokens"] = totals["prompt_tokens"] + totals["completion_tokens"]
+    return {"totals": totals, "groups": groups}
+
+
+def usage_for_actor_today(actor: str) -> dict:
+    day = datetime.now().strftime("%Y-%m-%d")
+    rows = [r for r in usage_rows(since=f"{day} 00:00:00") if (r.get("actor") or "") == actor]
+    tokens = sum(
+        int(r.get("prompt_tokens") or 0) + int(r.get("completion_tokens") or 0) for r in rows
+    )
+    cost = sum(float(r.get("cost") or 0) for r in rows)
+    return {"calls": len(rows), "tokens": tokens, "cost": cost}
+
+
+def usage_for_actor_month(actor: str) -> dict:
+    month = datetime.now().strftime("%Y-%m")
+    rows = [r for r in usage_rows(since=f"{month}-01 00:00:00") if (r.get("actor") or "") == actor]
+    cost = sum(float(r.get("cost") or 0) for r in rows)
+    tokens = sum(
+        int(r.get("prompt_tokens") or 0) + int(r.get("completion_tokens") or 0) for r in rows
+    )
+    return {"calls": len(rows), "tokens": tokens, "cost": cost}
+
+
+def set_api_key_quota(key_id: int, daily_token_limit: int = 0, monthly_cost_limit: float = 0) -> None:
+    init_db()
+    with _conn() as c:
+        c.execute(
+            "UPDATE api_keys SET daily_token_limit = ?, monthly_cost_limit = ? WHERE id = ?",
+            (int(daily_token_limit or 0), float(monthly_cost_limit or 0), key_id),
+        )
+
+
+def get_api_key_by_name(name: str) -> dict | None:
+    init_db()
+    with _conn() as c:
+        row = c.execute("SELECT * FROM api_keys WHERE name = ?", (name,)).fetchone()
+    return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# 威胁验证（对抗式复核）
+# ---------------------------------------------------------------------------
+
+VERDICTS = ["已确认", "存疑", "已驳回"]
+CONFIDENCES = ["高", "中", "低"]
+
+
+def apply_verification(project: str, results: list[dict]) -> int:
+    """按（类型+场景）指纹把验证结果写回台账。"""
+    if not project or not results:
+        return 0
+    init_db()
+    updated = 0
+    now = _now()
+    with _conn() as c:
+        for item in results:
+            ttype = str(item.get("threat_type") or "").strip()
+            scenario = str(item.get("scenario") or "").strip()
+            if not scenario:
+                continue
+            fingerprint = _threat_fingerprint(ttype, scenario)
+            cur = c.execute(
+                """
+                UPDATE threats
+                SET verdict = ?, confidence = ?, verification_note = ?, verified_at = ?
+                WHERE project = ? AND fingerprint = ?
+                """,
+                (
+                    str(item.get("verdict") or ""),
+                    str(item.get("confidence") or ""),
+                    str(item.get("reason") or ""),
+                    now,
+                    project,
+                    fingerprint,
+                ),
+            )
+            updated += cur.rowcount or 0
+    return updated
+
+
+def threat_verdict_stats(project: str | None = None) -> dict:
+    rows = list_threats(project=project)
+    stats = dict.fromkeys(VERDICTS, 0)
+    unverified = 0
+    for row in rows:
+        if row.get("verdict") in stats and row["verdict"]:
+            stats[row["verdict"]] += 1
+        else:
+            unverified += 1
+    return {**stats, "未验证": unverified, "total": len(rows)}

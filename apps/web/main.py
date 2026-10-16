@@ -46,6 +46,7 @@ from common import exporters as _exporters
 from common import generation as _generation
 from common import i18n as _i18n
 from common import store
+from common import usage as _usage
 
 _t = _i18n.t
 from common.store import (
@@ -53,6 +54,7 @@ from common.store import (
     PERSIST_KEYS,
     SESSION_COOKIE,
     THREAT_STATUSES,
+    VERDICTS,
     backfill_project,
     clear_config,
     config_saved_at,
@@ -1692,37 +1694,6 @@ with st.sidebar:
         _t("威胁建模是软件开发生命周期中的关键活动，但常被忽视或执行不力。本系统利用大语言模型（LLM）的能力，根据你提供的信息为应用生成威胁列表、攻击树和/或缓解控制措施，帮助团队产出更全面的威胁模型。", "Threat modeling is a key activity in the software development lifecycle, but it is often overlooked or poorly executed. This system leverages large language models to generate threat lists, attack trees and/or mitigating controls from the details you provide, helping teams produce more comprehensive threat models.")
     )
     st.markdown(_t("作者：[Matt Adams](https://www.linkedin.com/in/matthewrwadams/)。", "Created by [Matt Adams](https://www.linkedin.com/in/matthewrwadams/)."))
-    # Add "Star on GitHub" link to the sidebar
-    st.markdown(
-        _t("GitHub 加星：[![Star on GitHub](https://img.shields.io/github/stars/mrwadams/stride-gpt?style=social)](https://github.com/mrwadams/stride-gpt)", "Star on GitHub: [![Star on GitHub](https://img.shields.io/github/stars/mrwadams/stride-gpt?style=social)](https://github.com/mrwadams/stride-gpt)")
-    )
-
-    # Donate button - smaller version
-    st.markdown(
-        """
-        <div style="text-align: center; margin: 10px 0;">
-            <a href="https://buymeacoffee.com/mrwadams" target="_blank">
-                <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png"
-                     alt="Buy Me A Coffee"
-                     style="height: 35px !important; width: 127px !important;">
-            </a>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("""---""")
-
-
-# Add "Example Application Description" section to the sidebar
-st.sidebar.header(_t("示例应用描述", "Example application description"))
-
-with st.sidebar:
-    st.markdown(_t("以下是一个示例应用描述，可用于快速体验本系统：", "Below is an example application description you can use to try the system:"))
-    st.markdown(
-        _t("> 一个允许用户创建、存储和分享个人笔记的 Web 应用。应用前端使用 React 框架，后端为 Node.js，数据库为 MongoDB。用户可以通过 Google 或 Facebook 的 OAuth2 注册并登录。笔记在静态存储时加密，只有创建者本人可以访问。应用还支持多用户实时协作编辑笔记。", "> A web application that lets users create, store, and share personal notes. It uses a React frontend, a Node.js backend, and MongoDB. Users sign up and log in via OAuth2 with Google or Facebook. Notes are encrypted at rest and only accessible to their creator. The app also supports real-time collaborative editing.")
-    )
-    st.markdown("""---""")
 
 # Add "FAQs" section to the sidebar
 st.sidebar.header(_t("常见问题", "FAQ"))
@@ -1960,10 +1931,71 @@ def render_settings() -> None:
                 help=_t("保存配置后生效，将作为额外的系统指令附加到每次模型调用。", "Takes effect after saving; appended as an extra system instruction to every model call."),
             )
             st.checkbox(
+                _t(
+                    "生成威胁模型后自动对抗式复核（标注置信度）",
+                    "Adversarially verify each threat after generation",
+                ),
+                key="verify_threats",
+                value=bool(st.session_state.get("verify_threats", True)),
+                help=_t(
+                    "复核会额外调用一次模型，给出 已确认/存疑/已驳回 与置信度，并写回威胁台账。",
+                    "Adds one extra model call and writes verdicts back to the threat register.",
+                ),
+            )
+            st.checkbox(
                 _t("发送前对密钥 / 令牌做脱敏", "Scrub secrets/tokens before sending"),
                 key="scrub_enabled",
                 value=bool(st.session_state.get("scrub_enabled", True)),
                 help=_t("识别 OpenAI/Anthropic/GitHub/AWS/JWT/私钥等模式并替换为 [已脱敏:...]。", "Detects OpenAI/Anthropic/GitHub/AWS/JWT/private-key patterns and replaces them with [redacted:…]."),
+            )
+
+        with st.container(border=True, key="settings_usage"):
+            st.markdown(_t("#### 用量与成本", "#### Usage & cost"))
+            _budget = _usage.budget_status()
+            st.number_input(
+                _t("月度预算（美元，0 = 不限）", "Monthly budget (USD, 0 = unlimited)"),
+                min_value=0.0,
+                value=float(st.session_state.get("monthly_budget") or 0.0),
+                step=10.0,
+                key="monthly_budget",
+            )
+            if _budget["budget"]:
+                st.progress(
+                    min(1.0, _budget["ratio"]),
+                    text=_t(
+                        f"本月已用 ${_budget['spent']:.2f} / ${_budget['budget']:.2f}",
+                        f"${_budget['spent']:.2f} of ${_budget['budget']:.2f} spent this month",
+                    ),
+                )
+            else:
+                st.caption(
+                    _t(
+                        f"本月已用 ${_budget['spent']:.2f} · {_budget['tokens']:,} tokens ·"
+                        f" {_budget['calls']} 次调用",
+                        f"${_budget['spent']:.2f} · {_budget['tokens']:,} tokens ·"
+                        f" {_budget['calls']} calls this month",
+                    )
+                )
+            _model_rows = _usage_month_groups()
+            if _model_rows:
+                _lines = [
+                    _t(
+                        "| 模型 | 调用 | tokens | 估算成本 |",
+                        "| Model | Calls | Tokens | Est. cost |",
+                    ),
+                    "|---|---|---|---|",
+                ]
+                _lines.extend(
+                    f"| {_row['key']} | {_row['calls']} | {_row['tokens']:,} |"
+                    f" ${_row['cost']:.2f} |"
+                    for _row in _model_rows
+                )
+                st.markdown("\n".join(_lines))
+            st.caption(
+                _t(
+                    "价格是公开标价的近似值，仅用于内部估算。",
+                    "Prices are approximate list prices for internal estimation only.",
+                )
             )
 
         with st.container(border=True, key="settings_api"):
@@ -1972,11 +2004,33 @@ def render_settings() -> None:
             _new_key_name = st.text_input(
                 _t("新密钥名称", "New key name"), key="api_key_name", placeholder=_t("如：CI 流水线", "e.g. CI pipeline")
             )
+            _q1, _q2 = st.columns(2)
+            with _q1:
+                _key_daily = st.number_input(
+                    _t("日 token 配额（0 = 不限）", "Daily token quota (0 = unlimited)"),
+                    min_value=0,
+                    value=0,
+                    step=100_000,
+                    key="new_key_daily",
+                )
+            with _q2:
+                _key_monthly = st.number_input(
+                    _t("月费用配额（美元，0 = 不限）", "Monthly cost quota (USD, 0 = unlimited)"),
+                    min_value=0.0,
+                    value=0.0,
+                    step=10.0,
+                    key="new_key_monthly",
+                )
             if st.button(_t("创建 API Key", "Create API key"), key="create_api_key", use_container_width=True):
                 if not (_new_key_name or "").strip():
                     st.warning(_t("请先填写密钥名称", "Enter a key name first"))
                 else:
                     st.session_state["_new_api_key"] = store.create_api_key(_new_key_name.strip())
+                    _new_key_row = store.get_api_key_by_name(_new_key_name.strip())
+                    if _new_key_row:
+                        store.set_api_key_quota(
+                            _new_key_row["id"], int(_key_daily), float(_key_monthly)
+                        )
                     store.log_action(
                         st.session_state.get("user", ""), _t("创建 API Key", "Create API key"), _new_key_name.strip()
                     )
@@ -1988,8 +2042,15 @@ def render_settings() -> None:
             for _k in _keys:
                 _kc1, _kc2 = st.columns([4, 1], vertical_alignment="center")
                 with _kc1:
+                    _quota_bits = []
+                    if _k.get("daily_token_limit"):
+                        _quota_bits.append(f"{_k['daily_token_limit']:,} tokens/day")
+                    if _k.get("monthly_cost_limit"):
+                        _quota_bits.append(f"${_k['monthly_cost_limit']:.2f}/month")
                     st.markdown(
-                        f"**{_k['name']}**  \n<span class='sg-rep-meta'>创建 {_k['created_at']}"
+                        f"**{_k['name']}**"
+                        + (f"（{' · '.join(_quota_bits)}）" if _quota_bits else "")
+                        + f"  \n<span class='sg-rep-meta'>创建 {_k['created_at']}"
                         f" · 最近使用 {_k['last_used_at'] or '—'}</span>",
                         unsafe_allow_html=True,
                     )
@@ -2457,7 +2518,7 @@ def _page_threat_model() -> None:
                     st.session_state["threat_model_markdown"] = json_to_markdown(
                         threat_model, improvement_suggestions
                     )
-                    _archive(
+                    _archived_project = _archive(
                         "threat_model",
                         st.session_state["threat_model_markdown"],
                         {
@@ -2465,11 +2526,44 @@ def _page_threat_model() -> None:
                             "improvement_suggestions": improvement_suggestions,
                         },
                     )
+                    st.session_state["threat_model_verification"] = None
+                    if _generation.verification_enabled() and threat_model:
+                        with st.spinner(_t("正在对抗式复核威胁…", "Adversarially reviewing threats…")):
+                            try:
+                                _vstats = _generation.verify_and_store(
+                                    _archived_project, threat_model
+                                )
+                                st.session_state["threat_model_verification"] = _vstats
+                            except Exception as _vexc:
+                                st.warning(
+                                    _t("威胁复核失败：", "Threat verification failed: ")
+                                    + str(_vexc)
+                                )
                     _cov = _generation.stride_coverage(threat_model)
                     if _cov["missing"]:
-                        st.warning("STRIDE 覆盖度：缺少 " + "、".join(_cov["missing"]) + " 类威胁")
+                        st.warning(
+                            _t("STRIDE 覆盖度：缺少 ", "STRIDE coverage: missing ")
+                            + "、".join(_cov["missing"])
+                            + _t(" 类威胁", " categories")
+                        )
                     else:
-                        st.success(_t("STRIDE 覆盖度：六类威胁均已覆盖", "STRIDE coverage: all six categories covered"))
+                        st.success(
+                            _t(
+                                "STRIDE 覆盖度：六类威胁均已覆盖",
+                                "STRIDE coverage: all six categories covered",
+                            )
+                        )
+                    _vstats = st.session_state.get("threat_model_verification")
+                    if _vstats:
+                        st.info(
+                            _t("对抗式复核：", "Adversarial review: ")
+                            + _t("已确认", "confirmed")
+                            + f" {_vstats.get('已确认', 0)} · "
+                            + _t("存疑", "uncertain")
+                            + f" {_vstats.get('存疑', 0)} · "
+                            + _t("已驳回", "refuted")
+                            + f" {_vstats.get('已驳回', 0)}"
+                        )
                     break  # Exit the loop if successful
                 except Exception as e:
                     retry_count += 1
@@ -3242,9 +3336,13 @@ def _archive(
     project: str | None = None,
     description: str | None = None,
 ) -> None:
-    """把生成结果归档到「报告历史」，并同步项目/威胁台账（失败不影响展示）。"""
+    """把生成结果归档到「报告历史」，并同步项目/威胁台账（失败不影响展示）。
+
+    返回实际使用的项目名（供调用方继续做验证等操作）。
+    """
+    _used_project = ""
     if not content_md:
-        return
+        return _used_project
     try:
         _desc = (
             description if description is not None else st.session_state.get("app_input") or ""
@@ -3252,6 +3350,7 @@ def _archive(
         _project = (project or st.session_state.get("project_name") or "").strip()
         if not _project:
             _project = (_desc[:24] + "…") if len(_desc) > 24 else (_desc or "未命名项目")
+        _used_project = _project
         _generation.archive_result(
             kind,
             content_md,
@@ -3264,6 +3363,7 @@ def _archive(
         st.toast("已归档到「报告历史」")
     except Exception:
         pass
+    return _used_project
 
 
 @st.dialog("报告详情", width="large")
@@ -3829,7 +3929,7 @@ def _page_projects() -> None:
         if not _threats:
             st.info(_t("暂无威胁条目。生成一次威胁模型后会自动写入台账。", "No threats yet. They are written to the register after a threat model run."))
         else:
-            _f1, _f2 = st.columns([2, 2])
+            _f1, _f2, _f3 = st.columns([2, 2, 2])
             with _f1:
                 _status_filter = st.multiselect(
                     _t("状态筛选", "Filter by status"),
@@ -3838,13 +3938,45 @@ def _page_projects() -> None:
                     placeholder=_t("选择状态…", "Select status…"),
                 )
             with _f2:
-                _kw = st.text_input(
-                    _t("搜索", "Search"), key=f"ws_kw_{_sel}", placeholder=_t("场景 / 类型 / 负责人", "Scenario / type / owner")
+                _verdict_filter = st.multiselect(
+                    _t("验证筛选", "Filter by verdict"),
+                    [*VERDICTS, _t("未验证", "Unverified")],
+                    key=f"ws_verdict_{_sel}",
+                    placeholder=_t("选择验证结论…", "Select verdict…"),
                 )
+            with _f3:
+                _kw = st.text_input(
+                    _t("搜索", "Search"),
+                    key=f"ws_kw_{_sel}",
+                    placeholder=_t("场景 / 类型 / 负责人", "Scenario / type / owner"),
+                )
+            if _is_admin() and st.button(
+                _t("对最近一次威胁模型重新验证", "Re-verify latest threat model"),
+                key="ws_reverify",
+            ):
+                _models = _generation.latest_threat_models(_sel, limit=1)
+                if not _models:
+                    st.warning(_t("该项目还没有威胁模型。", "No threat model for this project yet."))
+                else:
+                    with st.spinner(_t("正在对抗式复核…", "Adversarially reviewing…")):
+                        _stats = _generation.verify_and_store(_sel, _models[0])
+                    store.log_action(
+                        st.session_state.get("user", ""), "重新验证威胁", _sel
+                    )
+                    st.success(
+                        _t("复核完成：", "Review done: ")
+                        + f"已确认 {_stats.get('已确认', 0)} · 存疑 {_stats.get('存疑', 0)} ·"
+                        f" 已驳回 {_stats.get('已驳回', 0)}"
+                    )
+                    st.rerun()
             _rows = [
                 t
                 for t in _threats
                 if (not _status_filter or t["status"] in _status_filter)
+                and (
+                    not _verdict_filter
+                    or ((t.get("verdict") or _t("未验证", "Unverified")) in _verdict_filter)
+                )
                 and (
                     not _kw
                     or _kw.lower()
@@ -3860,9 +3992,19 @@ def _page_projects() -> None:
                         _tags = " · ".join(
                             x for x in [t["owasp_llm"], t["owasp_asi"], t["mitre"]] if x
                         )
+                        _verdict = t.get("verdict") or _t("未验证", "Unverified")
+                        _conf = t.get("confidence") or ""
+                        _verdict_badge = f" · {_verdict}" + (f"（{_conf}）" if _conf else "")
                         st.markdown(
-                            f"**#{t['id']} {t['threat_type']}** · 风险分 {_score}"
+                            f"**#{t['id']} {t['threat_type']}** · {_t('风险分', 'Risk')} {_score}"
+                            f"{_verdict_badge}"
                             f"  \n<span class='sg-rep-meta'>{t['scenario']}</span>"
+                            + (
+                                f"  \n<span class='sg-rep-meta'>{_t('复核意见：', 'Review note: ')}"
+                                f"{t.get('verification_note')}</span>"
+                                if t.get("verification_note")
+                                else ""
+                            )
                             + (f"  \n<span class='sg-rep-meta'>{_tags}</span>" if _tags else ""),
                             unsafe_allow_html=True,
                         )
@@ -4046,9 +4188,133 @@ def _page_users() -> None:
     st.markdown("\n".join(_lines))
 
 
+def _usage_month_groups(limit: int = 8) -> list[dict]:
+    """本月按模型的用量（设置页与仪表盘共用）。"""
+    month_start = datetime.now().strftime("%Y-%m") + "-01 00:00:00"
+    summary = store.usage_summary(since=month_start)
+    rows = [{"key": key, **value} for key, value in summary["groups"]["model"].items()]
+    rows.sort(key=lambda r: -r["tokens"])
+    return rows[:limit]
+
+
+def _page_overview() -> None:
+    """概览仪表盘：全局风险态势、验证与用量、近期活动、快捷入口。"""
+    store.sync_projects_from_reports()
+    _projects = store.list_projects()
+    _reports = store.list_reports(limit=2000)
+    _threats = store.list_threats()
+    _vstats = store.threat_verdict_stats()
+
+    _open = sum(1 for t in _threats if t["status"] == "待处理")
+    _fixed = sum(1 for t in _threats if t["status"] == "已修复")
+    _risk = sorted(
+        [t for t in _threats if t["risk_score"] is not None],
+        key=lambda t: -float(t["risk_score"]),
+    )[:5]
+
+    _k1, _k2, _k3, _k4, _k5 = st.columns(5)
+    _k1.metric(_t("项目", "Projects"), len(_projects))
+    _k2.metric(_t("报告", "Reports"), len(_reports))
+    _k3.metric(_t("威胁条目", "Threats"), len(_threats))
+    _k4.metric(_t("待处理", "Open"), _open)
+    _k5.metric(_t("已修复", "Fixed"), _fixed)
+
+    _left, _right = st.columns([1.3, 1], gap="large")
+    with _left:
+        st.markdown(_t("#### 风险态势", "#### Risk posture"))
+        _by_type: dict[str, int] = {}
+        for _item in _threats:
+            _by_type[_item["threat_type"]] = _by_type.get(_item["threat_type"], 0) + 1
+        _by_type = dict(sorted(_by_type.items(), key=lambda kv: -kv[1]))
+        if _by_type:
+            st.bar_chart({_t("威胁数量", "Threats"): _by_type})
+        else:
+            st.caption(_t("暂无威胁数据。", "No threat data yet."))
+
+        _status_series = {
+            _t("待处理", "Open"): _open,
+            _t("已修复", "Fixed"): _fixed,
+            _t("其他", "Other"): max(0, len(_threats) - _open - _fixed),
+        }
+        _status_series = {k: v for k, v in _status_series.items() if v}
+        if _status_series:
+            st.bar_chart({_t("数量", "Count"): _status_series})
+
+        if _risk:
+            st.markdown(_t("#### 高风险 Top 5", "#### Top 5 risks"))
+            _lines = [
+                _t("| 风险分 | 类型 | 场景 | 状态 |", "| Score | Type | Scenario | Status |"),
+                "|---|---|---|---|",
+            ]
+            for _item in _risk:
+                _scene = (_item["scenario"] or "").replace("|", "\\|").replace("\n", " ")[:70]
+                _lines.append(
+                    f"| {float(_item['risk_score']):.1f} | {_item['threat_type']} | {_scene} |"
+                    f" {_item['status']} |"
+                )
+            st.markdown("\n".join(_lines))
+
+    with _right:
+        st.markdown(_t("#### 验证与预算", "#### Verification & budget"))
+        st.markdown(
+            f"- {_t('已确认', 'Confirmed')}：**{_vstats.get('已确认', 0)}**\n"
+            f"- {_t('存疑', 'Uncertain')}：**{_vstats.get('存疑', 0)}**\n"
+            f"- {_t('已驳回', 'Refuted')}：**{_vstats.get('已驳回', 0)}**\n"
+            f"- {_t('未验证', 'Unverified')}：**{_vstats.get('未验证', 0)}**"
+        )
+        _budget = _usage.budget_status()
+        if _budget["budget"]:
+            st.progress(
+                min(1.0, _budget["ratio"]),
+                text=f"${_budget['spent']:.2f} / ${_budget['budget']:.2f}",
+            )
+        else:
+            st.caption(
+                _t(
+                    f"本月用量：${_budget['spent']:.2f} · {_budget['tokens']:,} tokens",
+                    f"This month: ${_budget['spent']:.2f} · {_budget['tokens']:,} tokens",
+                )
+            )
+
+        st.markdown(_t("#### 近期报告", "#### Recent reports"))
+        if _reports:
+            for _row in _reports[:5]:
+                st.markdown(
+                    f"- {_kind_label(_row['kind'])} · {_row['project'] or '—'}"
+                    f"  \n<span class='sg-rep-meta'>{_row['created_at']}</span>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption(_t("暂无报告。", "No reports yet."))
+
+        st.markdown(_t("#### 快捷入口", "#### Quick actions"))
+        _qa1, _qa2 = st.columns(2)
+        with _qa1:
+            if st.button(
+                _t("生成威胁模型", "Threat model"), key="ov_tm", use_container_width=True
+            ):
+                st.session_state["nav_page"] = _t("威胁模型", "Threat Model")
+                st.rerun()
+            if st.button(_t("项目工作区", "Projects"), key="ov_proj", use_container_width=True):
+                st.session_state["nav_page"] = _t("项目工作区", "Projects")
+                st.rerun()
+        with _qa2:
+            if st.button(
+                _t("报告历史", "Report history"), key="ov_rep", use_container_width=True
+            ):
+                st.session_state["nav_page"] = _t("报告历史", "Report History")
+                st.rerun()
+            if _is_admin() and st.button(
+                _t("系统配置", "System settings"), key="ov_cfg", use_container_width=True
+            ):
+                st.session_state["view"] = "settings"
+                st.rerun()
+
+
 # ------------------ 页面路由（独立 URL） ------------------ #
 
 _PAGE_HEADERS = {
+    _t("概览", "Overview"): ("OVERVIEW", _t("概览", "Overview")),
     _t("威胁模型", "Threat Model"): ("THREAT MODEL", _t("威胁模型", "Threat Model")),
     _t("项目工作区", "Projects"): ("PROJECTS", _t("项目工作区", "Projects")),
     _t("攻击树", "Attack Tree"): ("ATTACK TREE", _t("攻击树", "Attack Tree")),
@@ -4062,7 +4328,8 @@ _PAGE_HEADERS = {
 
 # 六个页面注册为独立路由：每页有自己的地址（可刷新 / 收藏 / 分享）
 _PAGE_PAGES = {
-    _t("威胁模型", "Threat Model"): st.Page(_page_threat_model, title=_t("威胁模型", "Threat Model"), url_path="threat-model", default=True),
+    _t("概览", "Overview"): st.Page(_page_overview, title=_t("概览", "Overview"), url_path="overview", default=True),
+    _t("威胁模型", "Threat Model"): st.Page(_page_threat_model, title=_t("威胁模型", "Threat Model"), url_path="threat-model"),
     _t("项目工作区", "Projects"): st.Page(_page_projects, title=_t("项目工作区", "Projects"), url_path="projects"),
     _t("攻击树", "Attack Tree"): st.Page(_page_attack_tree, title=_t("攻击树", "Attack Tree"), url_path="attack-tree"),
     _t("数据流图", "Data Flow Diagram"): st.Page(_page_data_flow, title=_t("数据流图", "Data Flow Diagram"), url_path="data-flow-diagram"),
@@ -4075,8 +4342,16 @@ _PAGE_PAGES = {
 
 _pg = st.navigation(list(_PAGE_PAGES.values()), position="hidden")
 
+# 用量上下文：本线程后续所有模型调用都会记到当前用户/项目名下
+_usage.set_call_context(
+    actor=st.session_state.get("user", ""),
+    source="web",
+    project=st.session_state.get("project_name", ""),
+)
+
 # 登录后跳转回进入前的深链目标
 _PATH_TO_TITLE = {
+    "overview": _t("概览", "Overview"),
     "threat-model": _t("威胁模型", "Threat Model"),
     "projects": _t("项目工作区", "Projects"),
     "attack-tree": _t("攻击树", "Attack Tree"),

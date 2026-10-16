@@ -193,3 +193,14 @@ curl -sS -X POST "http://localhost:8000/api/v1/schedules" -H "X-API-Key: $WY_API
   -H "Content-Type: application/json" \
   -d '{"project":"订单系统","interval_minutes":1440,"notify_on_change":true}'
 ```
+
+## 用量、配额与复核（P5）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/usage` | 用量与成本统计（可选 `since` / `until`，返回分组明细与预算状态） |
+| POST | `/api/v1/projects/{name}/verify` | 对最近一次威胁模型重做对抗式复核，结果写回台账 |
+
+生成类接口的响应中：
+- `threat-model` 会附带 `coverage`（STRIDE 覆盖度）与 `verification`（已确认/存疑/已驳回统计）
+- API Key 可设置**日 token 配额**与**月费用配额**，超限返回 `429`

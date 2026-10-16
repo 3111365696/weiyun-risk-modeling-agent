@@ -25,6 +25,7 @@ from stride_gpt.core.threat_model import generate_threat_model
 from stride_gpt.models import PROVIDERS, get_models_for_provider
 
 from . import store
+from . import usage as _usage
 from .text import (
     create_attack_tree_prompt,
     create_dread_assessment_prompt,
@@ -143,8 +144,10 @@ def build_prompt(kind: str, profile: dict, description: str, threats_md: str = "
     raise GenerationError(f"未知的产物类型：{kind}")
 
 
-def run_generation(kind: str, prompt: str, settings: dict) -> tuple[str, dict | None]:
-    """调用模型生成一类产物，返回 (markdown, json_data)。"""
+def run_generation(
+    kind: str, prompt: str, settings: dict, *, context: dict | None = None
+) -> tuple[str, dict | None]:
+    """调用模型生成一类产物，返回 (markdown, json_data)；同时记录用量。"""
     apply_policies()
     config = build_llm_config(settings)
     if kind == "threat_model":
@@ -232,7 +235,22 @@ def run_full_pipeline(
             )
             if kind == "threat_model":
                 threats_md = content_md
-            item = {"kind": kind, "ok": True, "report_id": report_id}
+                if verification_enabled():
+                    try:
+                        stats = verify_and_store(
+                            project,
+                            list((content_json or {}).get("threat_model") or []),
+                            settings,
+                            context={"actor": settings.get("actor", "pipeline"), "source": "pipeline", "project": project},
+                        )
+                        item_extra = {"verification": stats}
+                    except Exception as exc:
+                        item_extra = {"verification_error": str(exc)}
+                else:
+                    item_extra = {}
+            else:
+                item_extra = {}
+            item = {"kind": kind, "ok": True, "report_id": report_id, **item_extra}
         except Exception as exc:
             item = {"kind": kind, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
         results.append(item)
@@ -436,9 +454,14 @@ def diff_latest_threat_models(project: str) -> dict | None:
 
 
 def apply_policies() -> dict:
-    """把服务端配置中的企业基线 / 脱敏策略应用到 LLM 调用层。"""
-    from stride_gpt.core.llm import set_extra_system_instruction, set_prompt_scrubber
+    """把服务端配置中的企业基线 / 脱敏策略 / 用量记录应用到 LLM 调用层。"""
+    from stride_gpt.core.llm import (
+        set_extra_system_instruction,
+        set_prompt_scrubber,
+        set_usage_recorder,
+    )
 
+    set_usage_recorder(_usage.record_from_response)
     saved = store.load_config()
     baseline = (saved.get("security_baseline") or "").strip()
     set_extra_system_instruction(baseline or None)
@@ -490,6 +513,7 @@ def run_scheduled_analysis(schedule: dict) -> dict:
             return result
 
         settings = resolve_model_settings()
+        _usage.set_call_context(actor="scheduler", source="scheduler", project=project)
         steps = run_full_pipeline(
             description=description,
             profile={"app_type": "Web application"},
@@ -532,3 +556,121 @@ def run_scheduled_analysis(schedule: dict) -> dict:
         result["error"] = f"{type(exc).__name__}: {exc}"
         store.update_schedule(schedule["id"], last_run=store._now(), last_status=f"failed: {exc}")
     return result
+
+
+# ---------------------------------------------------------------------------
+# 对抗式验证（Critic）
+# ---------------------------------------------------------------------------
+
+_VERDICT_ALIASES = {
+    "已确认": "已确认",
+    "confirmed": "已确认",
+    "confirm": "已确认",
+    "valid": "已确认",
+    "存疑": "存疑",
+    "uncertain": "存疑",
+    "maybe": "存疑",
+    "已驳回": "已驳回",
+    "refuted": "已驳回",
+    "refute": "已驳回",
+    "invalid": "已驳回",
+    "false": "已驳回",
+}
+_CONFIDENCE_ALIASES = {
+    "高": "高",
+    "high": "高",
+    "中": "中",
+    "medium": "中",
+    "mid": "中",
+    "低": "低",
+    "low": "低",
+}
+
+_VERIFY_PROMPT = """你是一名对抗性安全评审员（红队视角），负责质疑一份威胁模型中的每一条威胁。
+
+判断标准：
+- 已确认：攻击场景具体、与系统描述相符、有清晰可达的攻击路径
+- 存疑：描述笼统、依赖未说明的前提、无法判断是否真的可达
+- 已驳回：与系统描述矛盾、纯泛泛而谈的套话、或明显是模型幻觉
+
+只输出 JSON，不要任何其他文字：
+{{"results": [{{"i": 1, "verdict": "已确认|存疑|已驳回", "confidence": "高|中|低", "reason": "一句话理由"}}]}}
+
+威胁列表（编号对应 i）：
+{threats}
+"""
+
+
+def _normalise_verdict(value: str) -> str:
+    return _VERDICT_ALIASES.get(str(value or "").strip().lower(), "存疑")
+
+
+def _normalise_confidence(value: str) -> str:
+    return _CONFIDENCE_ALIASES.get(str(value or "").strip().lower(), "中")
+
+
+def verify_threats(
+    threats: list[dict],
+    settings: dict | None = None,
+    *,
+    context: dict | None = None,
+) -> list[dict]:
+    """对威胁列表做一次对抗性复核，返回带 verdict/confidence/reason 的结果。"""
+    if not threats:
+        return []
+    from stride_gpt.core.json_extract import extract_json_object
+    from stride_gpt.core.llm import call_llm
+
+    settings = settings or resolve_model_settings()
+    config = build_llm_config(settings)
+    lines = []
+    for index, threat in enumerate(threats, 1):
+        ttype = threat.get("Threat Type") or threat.get("threat_type") or ""
+        scenario = threat.get("Scenario") or threat.get("scenario") or ""
+        impact = threat.get("Potential Impact") or threat.get("impact") or ""
+        lines.append(f"{index}. [{ttype}] {scenario}（影响：{impact}）")
+    prompt = _VERIFY_PROMPT.format(threats="\n".join(lines))
+
+    response = call_llm(config, [{"role": "user", "content": prompt}])
+    parsed = extract_json_object(response.content) or {}
+    raw_results = parsed.get("results") if isinstance(parsed, dict) else None
+    if not isinstance(raw_results, list):
+        raw_results = []
+
+    results = []
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("i", 0)) - 1
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= index < len(threats):
+            continue
+        threat = threats[index]
+        results.append(
+            {
+                "threat_type": threat.get("Threat Type") or threat.get("threat_type") or "",
+                "scenario": threat.get("Scenario") or threat.get("scenario") or "",
+                "verdict": _normalise_verdict(item.get("verdict")),
+                "confidence": _normalise_confidence(item.get("confidence")),
+                "reason": str(item.get("reason") or "")[:300],
+            }
+        )
+    return results
+
+
+def verification_enabled() -> bool:
+    return bool(store.load_config().get("verify_threats", True))
+
+
+def verify_and_store(
+    project: str, threats: list[dict], settings: dict | None = None, *, context: dict | None = None
+) -> dict:
+    """复核并写回台账，返回统计。"""
+    results = verify_threats(threats, settings, context=context)
+    store.apply_verification(project, results)
+    stats = {"已确认": 0, "存疑": 0, "已驳回": 0, "verified": len(results)}
+    for item in results:
+        stats[item["verdict"]] = stats.get(item["verdict"], 0) + 1
+    return stats

@@ -20,7 +20,7 @@ for _p in (_REPO_ROOT, _APPS_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from common import generation, store  # noqa: E402
+from common import generation, store, usage  # noqa: E402
 from fastapi import Depends, FastAPI, Header, HTTPException  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
@@ -132,9 +132,18 @@ def _latest_threats_md(project: str) -> str:
     return rows[0]["content_md"]
 
 
+def _enforce_quota(api_key_name: str) -> None:
+    key_row = store.get_api_key_by_name(api_key_name) or {}
+    allowed, reason = usage.check_api_quota(key_row)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=reason)
+
+
 def _generate_one(kind: str, req: GenerateRequest, api_key_name: str) -> dict:
     settings = _settings(req)
     project = _project_name(req)
+    _enforce_quota(api_key_name)
+    usage.set_call_context(actor=f"api:{api_key_name}", source="api", project=project)
     threats_md = req.threats_md or ""
     if kind in generation.DEPENDENT_KINDS and not threats_md:
         threats_md = _latest_threats_md(project)
@@ -169,7 +178,13 @@ def _generate_one(kind: str, req: GenerateRequest, api_key_name: str) -> dict:
         "json": content_json,
     }
     if kind == "threat_model" and isinstance(content_json, dict):
-        response["coverage"] = generation.stride_coverage(content_json.get("threat_model"))
+        threats = list(content_json.get("threat_model") or [])
+        response["coverage"] = generation.stride_coverage(threats)
+        if generation.verification_enabled() and threats:
+            try:
+                response["verification"] = generation.verify_and_store(project, threats)
+            except Exception as exc:
+                response["verification_error"] = str(exc)
     return response
 
 
@@ -233,6 +248,8 @@ def api_test_cases(req: GenerateRequest, api_key_name: str = Depends(require_api
 def api_full_pipeline(req: FullPipelineRequest, api_key_name: str = Depends(require_api_key)) -> dict:
     settings = _settings(req)
     project = _project_name(req)
+    _enforce_quota(api_key_name)
+    usage.set_call_context(actor=f"api:{api_key_name}", source="api", project=project)
     results = generation.run_full_pipeline(
         description=req.description,
         profile=req.profile.model_dump(),
@@ -355,6 +372,27 @@ def api_project_threats(
 ) -> dict:
     rows = store.list_threats(project=name, status=status, search=search)
     return {"ok": True, "count": len(rows), "threats": rows}
+
+
+@app.get("/api/v1/usage", summary="用量与成本统计")
+def api_usage(
+    since: str | None = None,
+    until: str | None = None,
+    api_key_name: str = Depends(require_api_key),
+) -> dict:
+    summary = store.usage_summary(since, until)
+    return {"ok": True, **summary, "budget": usage.budget_status()}
+
+
+@app.post("/api/v1/projects/{name}/verify", summary="重新做对抗式复核")
+def api_verify_project(name: str, api_key_name: str = Depends(require_api_key)) -> dict:
+    _enforce_quota(api_key_name)
+    usage.set_call_context(actor=f"api:{api_key_name}", source="api", project=name)
+    models = generation.latest_threat_models(name, limit=1)
+    if not models:
+        raise HTTPException(status_code=404, detail=f"项目「{name}」还没有威胁模型报告")
+    stats = generation.verify_and_store(name, models[0])
+    return {"ok": True, "project": name, "verification": stats}
 
 
 @app.get("/api/v1/projects/{name}/coverage", summary="STRIDE 覆盖度（最近一次威胁模型）")

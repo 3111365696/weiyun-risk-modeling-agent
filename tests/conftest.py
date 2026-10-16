@@ -17,6 +17,33 @@ from stride_gpt.core.schemas import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_llm_policy_hooks():
+    """每个用例前后重置核心 LLM 层的全局策略钩子。
+
+    这些钩子（额外系统指令 / 脱敏器 / 用量记录器）与线程内调用上下文是模块级
+    全局状态。若某个用例安装后不复位，会泄漏到后续用例——曾导致用量统计被写入
+    真实数据库。这里统一隔离。
+    """
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "apps"))
+    from common import usage
+
+    from stride_gpt.core import llm
+
+    def _reset():
+        llm.set_extra_system_instruction(None)
+        llm.set_prompt_scrubber(None)
+        llm.set_usage_recorder(None)
+        usage.set_call_context(actor="", source="test", project="")
+
+    _reset()
+    yield
+    _reset()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _cli_dotenv_loaded_up_front():
     """Trigger ``stride_gpt.cli``'s import-time ``load_dotenv`` before any test.

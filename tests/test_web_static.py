@@ -39,12 +39,14 @@ def test_no_local_shadowing_of_module_helpers():
             targets: list[ast.expr] = []
             if isinstance(child, ast.Assign):
                 targets = list(child.targets)
-            elif isinstance(child, (ast.AnnAssign, ast.AugAssign)) or isinstance(child, (ast.For, ast.AsyncFor)):
+            elif isinstance(child, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor)):
                 targets = [child.target]
             for target in targets:
-                for name_node in ast.walk(target):
-                    if isinstance(name_node, ast.Name) and name_node.id in watched:
-                        issues.append(f"{func.name}: 局部变量 {name_node.id} 遮蔽了模块级名字")
+                issues.extend(
+                    f"{func.name}: 局部变量 {node.id} 遮蔽了模块级名字"
+                    for node in ast.walk(target)
+                    if isinstance(node, ast.Name) and node.id in watched
+                )
     assert not issues, "发现名字遮蔽：\n" + "\n".join(issues)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json as _json
 import re
 
@@ -49,12 +50,26 @@ GEMINI_SAFETY_SETTINGS = [
 
 _EXTRA_SYSTEM_INSTRUCTION: str = ""
 _PROMPT_SCRUBBER = None  # Callable[[str], tuple[str, list[str]]] | None
+_USAGE_RECORDER = None  # Callable[[LLMConfig, LLMResponse], None] | None
 
 
 def set_extra_system_instruction(text: str | None) -> None:
     """注入一段全局系统指令（如企业安全基线），所有调用生效。"""
     global _EXTRA_SYSTEM_INSTRUCTION
     _EXTRA_SYSTEM_INSTRUCTION = (text or "").strip()
+
+
+def set_usage_recorder(recorder) -> None:
+    """设置调用后记录用量的钩子（上层应用用于成本统计）。"""
+    global _USAGE_RECORDER
+    _USAGE_RECORDER = recorder
+
+
+def _report_usage(config: LLMConfig, response: LLMResponse) -> None:
+    if _USAGE_RECORDER is None:
+        return
+    with contextlib.suppress(Exception):  # 记账失败不影响调用
+        _USAGE_RECORDER(config, response)
 
 
 def set_prompt_scrubber(scrubber) -> None:
@@ -286,7 +301,7 @@ def _call_litellm(config: LLMConfig, messages: list[dict]) -> LLMResponse:
     if config.provider == "Groq API":
         reasoning, content = extract_deepseek_reasoning(content)
 
-    return LLMResponse(
+    _resp = LLMResponse(
         content=content,
         thinking=thinking,
         reasoning=reasoning,
@@ -294,6 +309,8 @@ def _call_litellm(config: LLMConfig, messages: list[dict]) -> LLMResponse:
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
     )
+    _report_usage(config, _resp)
+    return _resp
 
 
 def _parse_tool_arguments(raw: object) -> tuple[dict, str | None]:
@@ -345,7 +362,7 @@ def _call_litellm_with_tools(
     thinking, _ = _extract_thinking(config, response)
     prompt_tokens, completion_tokens = _extract_usage(response)
 
-    return LLMResponse(
+    _resp = LLMResponse(
         content=content,
         thinking=thinking,
         model=config.model_name,
@@ -353,6 +370,8 @@ def _call_litellm_with_tools(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
     )
+    _report_usage(config, _resp)
+    return _resp
 
 
 def _call_litellm_with_image(
