@@ -15,9 +15,11 @@ import hmac
 import io
 import json
 import os
+import re
 import sqlite3
 import time
 import zipfile
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 
@@ -135,11 +137,28 @@ def clear_config() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _conn() -> sqlite3.Connection:
+@contextlib.contextmanager
+def _conn() -> Iterator[sqlite3.Connection]:
+    """数据库连接（上下文管理器：正常提交、异常回滚、结束必关闭）。
+
+    P7 硬化：WAL 模式允许 Web/API/调度器并发读写；busy_timeout 让写锁等待
+    而不是立刻报 ``database is locked``；synchronous=NORMAL 在 WAL 下安全且更快。
+    """
     _ensure_dir()
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30.0)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
@@ -306,6 +325,21 @@ def init_db() -> None:
         _ensure_column(c, "threats", "source", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(c, "threats", "evidence", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(c, "threats", "cwe", "TEXT NOT NULL DEFAULT ''")
+        for ddl in (
+            "CREATE INDEX IF NOT EXISTS idx_reports_project ON reports(project)",
+            "CREATE INDEX IF NOT EXISTS idx_reports_kind ON reports(kind)",
+            "CREATE INDEX IF NOT EXISTS idx_reports_created ON reports(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_threats_project ON threats(project)",
+            "CREATE INDEX IF NOT EXISTS idx_threats_status ON threats(status)",
+            "CREATE INDEX IF NOT EXISTS idx_threats_report ON threats(report_id)",
+            "CREATE INDEX IF NOT EXISTS idx_threats_created ON threats(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(username)",
+            "CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_log(ts)",
+            "CREATE INDEX IF NOT EXISTS idx_usage_project ON usage_log(project)",
+            "CREATE INDEX IF NOT EXISTS idx_schedules_enabled ON schedules(enabled)",
+        ):
+            c.execute(ddl)
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -1095,6 +1129,43 @@ def set_user_password(username: str, password: str) -> None:
             "UPDATE users SET password_hash = ?, salt = ? WHERE username = ?",
             (pw_hash, salt, username),
         )
+
+
+def db_stats() -> dict:
+    """数据库概况（状态页展示）：文件大小、WAL 大小、各表行数。"""
+    size = DB_FILE.stat().st_size if DB_FILE.exists() else 0
+    wal = DB_FILE.with_name(DB_FILE.name + "-wal")
+    shm = DB_FILE.with_name(DB_FILE.name + "-shm")
+    stats = {
+        "file": str(DB_FILE),
+        "bytes": size,
+        "wal_bytes": wal.stat().st_size if wal.exists() else 0,
+        "shm_bytes": shm.stat().st_size if shm.exists() else 0,
+        "journal_mode": "",
+        "page_count": 0,
+        "page_size": 0,
+        "tables": {},
+    }
+    try:
+        with _conn() as c:
+            stats["journal_mode"] = str(c.execute("PRAGMA journal_mode").fetchone()[0])
+            stats["page_count"] = int(c.execute("PRAGMA page_count").fetchone()[0])
+            stats["page_size"] = int(c.execute("PRAGMA page_size").fetchone()[0])
+            names = [
+                row[0]
+                for row in c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                )
+            ]
+            counts = {}
+            for table in names:
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
+                    continue
+                counts[table] = int(c.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+            stats["tables"] = counts
+    except Exception:
+        pass
+    return stats
 
 
 def log_action(username: str, action: str, detail: str = "") -> None:
