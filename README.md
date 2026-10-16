@@ -12,6 +12,36 @@
 本仓库是开源项目 [stride-gpt](https://github.com/msoedov/stride-gpt) 的中文本地化发行版，
 在保留其 CLI 能力的基础上扩展为可部署的内部系统。
 
+## 界面预览
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/overview.png" alt="概览仪表盘"><br><sub><b>概览</b>：风险态势、验证统计、近期报告与用量</sub></td>
+    <td width="50%"><img src="docs/images/projects.png" alt="威胁台账"><br><sub><b>项目工作区</b>：威胁台账、状态/负责人/复核结论、定时计划与成员</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/threat-model.png" alt="威胁模型"><br><sub><b>威胁模型</b>：从描述、架构图、仓库或引导式问答生成</sub></td>
+    <td><img src="docs/images/code-audit.png" alt="代码审计"><br><sub><b>代码审计</b>：Agentic 代码库分析 + 静态分析（SAST）线索</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/reports.png" alt="报告历史"><br><sub><b>报告历史</b>：Markdown/HTML/JSON/SARIF/Word/PDF/STIX 导出</sub></td>
+    <td><img src="docs/images/status.png" alt="系统状态"><br><sub><b>系统状态</b>：版本、组件健康、任务与告警、一键备份</sub></td>
+  </tr>
+</table>
+
+<details>
+<summary>更多截图（登录页 / 系统配置）</summary>
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/login.png" alt="登录页"><br><sub><b>登录</b>：会话隔离、失败锁定、审计留痕</sub></td>
+    <td width="50%"><img src="docs/images/settings.png" alt="系统配置"><br><sub><b>系统配置</b>：模型服务、安全策略、API Key、配额</sub></td>
+  </tr>
+</table>
+</details>
+
+> 截图为演示数据（独立数据目录，与真实数据隔离）。
+
 ## 功能
 
 | 领域 | 能力 |
