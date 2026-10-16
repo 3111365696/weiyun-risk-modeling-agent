@@ -403,3 +403,17 @@ Python 看到函数内存在对 `_t` 的赋值就把它当作局部变量，于�
 ### 验证
 - 新增 52 个测试（日志 13、错误边界 6、API 追踪 4、SQLite 硬化 9、任务持久化 14 等）
 - 988 passed，ruff 全绿
+
+### P7-5 备份/恢复 + 系统状态页
+- `common/backup.py`：备份包 = 数据库在线快照（WAL 一致性）+ 加密配置 + 密钥 +
+  `manifest.json`（版本/时间/各文件 SHA-256/各表行数）；ZIP 存储、0600 权限
+- 校验：manifest 格式 + 逐文件哈希 + `PRAGMA integrity_check`
+- 恢复：先自动备份当前状态为 `pre-restore-*.zip`（保留 5 份）→ 临时文件 + 原子替换 →
+  清理过期 WAL；返回「需重启」提示；`--no-pre-restore` 可关闭
+- CLI：`python -m common.backup create|list|verify|restore`，配套 `scripts/backup.sh` /
+  `scripts/restore.sh`
+- 系统状态页（顶栏「系统状态」，仅管理员）：版本与运行时长、数据概况、最近任务
+  （含「已中断」提示）、组件健康（数据库/模型服务/REST API/调度器/静态分析）、
+  最近告警（结构化日志 WARNING+）、一键生成并下载备份 + 最近备份 + CLI 提示
+- `/api/v1/health` 增强：返回数据库自检结果与运行时长（探针可用）
+- 新增 24 个测试（备份 16 + 状态页 8）；全量 1012 passed，ruff 全绿

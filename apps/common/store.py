@@ -1346,6 +1346,15 @@ def prune_jobs(keep: int = 200) -> int:
     return removed
 
 
+def db_check() -> str:
+    """SQLite 快速完整性检查，返回 'ok' 或错误描述。"""
+    try:
+        with _conn() as c:
+            return str(c.execute("PRAGMA quick_check").fetchone()[0])
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
 def db_stats() -> dict:
     """数据库概况（状态页展示）：文件大小、WAL 大小、各表行数。"""
     size = DB_FILE.stat().st_size if DB_FILE.exists() else 0

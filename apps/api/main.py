@@ -14,6 +14,7 @@ import json
 import sys
 import threading
 import uuid
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -274,9 +275,27 @@ def _generate_one(kind: str, req: GenerateRequest, api_key_name: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+_STARTED_AT = datetime.now()
+
+
 @app.get("/api/v1/health", summary="健康检查（无需鉴权）")
 def health() -> dict:
-    return {"ok": True, "service": "weiyun-stride-gpt", "version": VERSION}
+    """存活/就绪检查：进程、数据库与运行时长（运维与负载均衡探针用）。"""
+    db_ok = True
+    try:
+        with store._conn() as conn:
+            db_ok = str(conn.execute("PRAGMA quick_check").fetchone()[0]).lower() == "ok"
+    except Exception:
+        db_ok = False
+    uptime = int((datetime.now() - _STARTED_AT).total_seconds())
+    return {
+        "ok": db_ok,
+        "service": "weiyun-stride-gpt",
+        "version": VERSION,
+        "database": "ok" if db_ok else "error",
+        "uptime_seconds": uptime,
+        "started_at": _STARTED_AT.strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 
 @app.get("/api/v1/config", summary="查看当前模型配置状态")

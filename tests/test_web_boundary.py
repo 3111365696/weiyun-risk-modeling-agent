@@ -160,4 +160,5 @@ class TestMainPageGuard:
                 f"页面 {ast.dump(first)[:80]} 未套错误边界"
             )
         assert 'guard_block("settings")' in source
+        assert 'guard_block("system-status")' in source
         assert "from error_boundary import guard, guard_block" in source

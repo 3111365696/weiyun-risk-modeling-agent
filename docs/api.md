@@ -33,7 +33,7 @@ X-API-Key: wy_xxxxxxxxxxxxxxxx
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/v1/health` | 健康检查（无鉴权） |
+| GET | `/api/v1/health` | 健康检查（无需鉴权）：`ok`、`version`、`database`、`uptime_seconds` |
 | GET | `/api/v1/config` | 当前模型配置状态（不返回密钥） |
 | POST | `/api/v1/threat-model` | STRIDE 威胁模型 |
 | POST | `/api/v1/dfd` | 数据流图（Mermaid） |
