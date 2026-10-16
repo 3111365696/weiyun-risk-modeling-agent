@@ -429,3 +429,17 @@ Python 看到函数内存在对 `_t` 的赋值就把它当作局部变量，于�
 - 防回归：`test_web_static.py` 增加「main.py < 700 行」「页面不得 import main」
   「名字遮蔽检查覆盖 apps/web 全部模块」
 - 验证：13/13 页面逐页渲染通过（AppTest 探针）、1014 passed、ruff 全绿
+
+### P8-3 项目级 RBAC + i18n 覆盖率门禁
+- `project_members` 表（project/username/role）；角色 owner/editor/viewer
+- 规则：全局管理员 → owner；未配置成员的项目 → editor（保持历史行为，添加成员后立即收紧）；
+  配置成员后非成员不可访问；viewer 只读、editor 可写、owner 可管理成员
+- store：set/remove/list members、project_role、can_edit_project、can_manage_project、
+  list_accessible_projects
+- Web：项目页新增「成员与权限」（owner/admin 可增删成员）；只读项目显示提示并禁用所有
+  写操作按钮；归档/全流程在服务层二次校验
+- API：`require_api_key` 记录 actor；生成/归档/威胁更新/Webhook 推送等按 API Key owner
+  判定项目权限（403）
+- i18n 门禁：`tests/test_i18n_coverage.py`（AST 扫描，允许标签字典/日志/提示词/数据枚举），
+  修复 91 处遗漏并顺手修掉两处「翻译值当数据键」的统计归零问题
+- 41 个新测试（RBAC 22 + i18n + 账号 32 已在前两阶段）；全量 1047 passed，ruff 全绿

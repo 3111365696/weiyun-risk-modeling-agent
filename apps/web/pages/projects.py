@@ -14,6 +14,8 @@ from shared import (
     _is_admin,
     _t,
     backfill_project,
+    can_manage_project,
+    can_write_project,
     list_projects,
     list_reports,
     list_threats,
@@ -39,12 +41,111 @@ def _page_projects() -> None:
         return
     backfill_project(_sel)
 
+    _can_edit = can_write_project(_sel)
+    _can_manage = can_manage_project(_sel)
     _stats = threat_stats(_sel)
     _m1, _m2, _m3, _m4 = st.columns(4)
     _m1.metric(_t("产物数量", "Artifacts"), _proj.get("report_count", 0))
     _m2.metric(_t("威胁总数", "Total threats"), _stats["total"])
-    _m3.metric(_t("待处理", "Open"), _stats["by_status"].get(_t("待处理", "Open"), 0))
+    _m3.metric(_t("待处理", "Open"), _stats["by_status"].get("待处理", 0))
     _m4.metric(_t("已修复", "Fixed"), _stats["by_status"].get("已修复", 0))
+
+    with st.expander(
+        _t("成员与权限", "Members & permissions")
+        + (" · " + _t("只读", "view-only") if not _can_edit else ""),
+        expanded=False,
+    ):
+        _role_labels = {
+            "owner": _t("负责人", "Owner"),
+            "editor": _t("可编辑", "Editor"),
+            "viewer": _t("只读", "Viewer"),
+        }
+        _members = store.list_project_members(_sel)
+        if not _members:
+            st.caption(
+                _t(
+                    "该项目尚未配置成员：所有登录用户都可以编辑。添加成员后将按角色控制访问。",
+                    "No members configured: every signed-in user can edit. Once you add members, access follows their roles.",
+                )
+            )
+        else:
+            _mlines = [
+                "| " + _t("用户", "User") + " | " + _t("角色", "Role") + " | "
+                + _t("加入时间", "Added") + " |",
+                "|---|---|---|",
+            ]
+            _mlines.extend(
+                f"| {_mem['username']} | {_role_labels.get(_mem['role'], _mem['role'])} | {_mem['created_at']} |"
+                for _mem in _members
+            )
+            st.markdown("\n".join(_mlines))
+        if _can_manage:
+            _ma, _mb, _mc = st.columns([1.6, 1.2, 1])
+            with _ma:
+                _candidates = [
+                    u["username"]
+                    for u in store.list_users()
+                    if u["username"] not in {mem["username"] for mem in _members}
+                ]
+                _new_member = st.selectbox(
+                    _t("添加成员", "Add member"),
+                    options=_candidates,
+                    key=f"ws_member_user_{_sel}",
+                    placeholder=_t("选择用户", "Pick a user"),
+                    index=None,
+                ) if _candidates else None
+                if not _candidates:
+                    st.caption(_t("没有可添加的用户（先在「用户与审计」创建）。", "No users left to add (create users under Users & audit first)."))
+            with _mb:
+                _new_role = st.selectbox(
+                    _t("角色", "Role"),
+                    options=["viewer", "editor", "owner"],
+                    format_func=lambda r: _role_labels.get(r, r),
+                    key=f"ws_member_role_{_sel}",
+                )
+            with _mc:
+                st.write("")
+                if st.button(
+                    _t("添加", "Add"),
+                    key=f"ws_member_add_{_sel}",
+                    use_container_width=True,
+                    disabled=not _new_member,
+                ):
+                    try:
+                        store.set_project_member(_sel, _new_member, _new_role)
+                        store.log_action(
+                            st.session_state.get("user", ""), "添加项目成员",
+                            f"{_sel} · {_new_member} · {_new_role}",
+                        )
+                        st.success(_t("已添加", "Added"))
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+            for _mem in _members:
+                if _mem["username"] == st.session_state.get("user"):
+                    continue
+                if st.button(
+                    _t(f"移除 {_mem['username']}", f"Remove {_mem['username']}"),
+                    key=f"ws_member_del_{_sel}_{_mem['username']}",
+                ):
+                    store.remove_project_member(_sel, _mem["username"])
+                    store.log_action(
+                        st.session_state.get("user", ""), "移除项目成员",
+                        f"{_sel} · {_mem['username']}",
+                    )
+                    st.rerun()
+        elif _members:
+            st.caption(
+                _t("只有项目负责人可以调整成员。", "Only the project owner can manage members.")
+            )
+
+    if not _can_edit:
+        st.warning(
+            _t(
+                "你在该项目是只读角色：可以查看，不能生成或修改。",
+                "You have view-only access to this project: you can review but not generate or modify.",
+            )
+        )
 
     _tab_overview, _tab_register, _tab_board = st.tabs(
         [_t("项目概览", "Overview"), _t("威胁台账", "Threat register"), _t("风险看板", "Risk board")]
@@ -101,7 +202,12 @@ def _page_projects() -> None:
                 st.success(_t("已保存，并同步为当前分析输入。", "Saved and synced as the current analysis input."))
         with _c2:
             st.caption(_t("保存后，「威胁模型」页与一键全流程都会使用这段描述。", "After saving, the Threat model page and the full pipeline use this description."))
-        if st.button(_t("一键全流程生成", "Run full pipeline"), type="primary", key="ws_pipeline"):
+        if st.button(
+            _t("一键全流程生成", "Run full pipeline"),
+            type="primary",
+            key="ws_pipeline",
+            disabled=not _can_edit,
+        ):
             _desc_effective = (_desc or _proj.get("description") or st.session_state.get("app_input") or "").strip()
             store.log_action(st.session_state.get("user", ""), _t("一键全流程生成", "Run full pipeline"), _sel)
             _run_full_pipeline(_sel, _desc_effective)
@@ -127,7 +233,12 @@ def _page_projects() -> None:
             with _sc3:
                 _sb1, _sb2, _sb3, _sb4 = st.columns(4)
                 with _sb1:
-                    if st.button(_t("保存计划", "Save schedule"), key="ws_save_sched", use_container_width=True):
+                    if st.button(
+                        _t("保存计划", "Save schedule"),
+                        key="ws_save_sched",
+                        use_container_width=True,
+                        disabled=not _can_edit,
+                    ):
                         store.add_schedule(_sel, int(_interval_h) * 60, _notify)
                         store.log_action(
                             st.session_state.get("user", ""), "保存定时计划", _sel
@@ -135,7 +246,12 @@ def _page_projects() -> None:
                         st.success(_t("计划已保存", "Schedule saved"))
                         st.rerun()
                 with _sb2:
-                    if st.button(_t("立即执行", "Run now"), key="ws_run_sched", use_container_width=True):
+                    if st.button(
+                        _t("立即执行", "Run now"),
+                        key="ws_run_sched",
+                        use_container_width=True,
+                        disabled=not _can_edit,
+                    ):
                         store.add_schedule(_sel, int(_interval_h) * 60, _notify)
                         _cur = next(
                             (s for s in store.list_schedules() if s["project"] == _sel), None
@@ -154,16 +270,29 @@ def _page_projects() -> None:
                         st.rerun()
                 with _sb3:
                     if _sched and _sched["enabled"]:
-                        if st.button(_t("暂停", "Pause"), key="ws_pause_sched", use_container_width=True):
+                        if st.button(
+                            _t("暂停", "Pause"),
+                            key="ws_pause_sched",
+                            use_container_width=True,
+                            disabled=not _can_edit,
+                        ):
                             store.update_schedule(_sched["id"], enabled=0)
                             st.rerun()
                     elif _sched and st.button(
-                        _t("启用", "Enable"), key="ws_resume_sched", use_container_width=True
+                        _t("启用", "Enable"),
+                        key="ws_resume_sched",
+                        use_container_width=True,
+                        disabled=not _can_edit,
                     ):
                         store.update_schedule(_sched["id"], enabled=1)
                         st.rerun()
                 with _sb4:
-                    if _sched and st.button(_t("删除", "Delete"), key="ws_del_sched", use_container_width=True):
+                    if _sched and st.button(
+                        _t("删除", "Delete"),
+                        key="ws_del_sched",
+                        use_container_width=True,
+                        disabled=not _can_edit,
+                    ):
                         store.delete_schedule(_sched["id"])
                         st.rerun()
             if _sched:
@@ -308,7 +437,12 @@ def _page_projects() -> None:
                         st.text_input(_t("备注", "Notes"), value=t["note"], key=f"th_note_{t['id']}")
             _reg_c1, _reg_c2 = st.columns([1, 3])
             with _reg_c1:
-                if st.button(_t("保存台账变更", "Save register changes"), type="primary", key="ws_save_threats"):
+                if st.button(
+                    _t("保存台账变更", "Save register changes"),
+                    type="primary",
+                    key="ws_save_threats",
+                    disabled=not _can_edit,
+                ):
                     _edits = [
                         {
                             "id": t["id"],
@@ -325,7 +459,11 @@ def _page_projects() -> None:
                     st.success(_t(f"已保存 {_n} 条变更。", f"Saved {_n} change(s)."))
                     st.rerun()
             with _reg_c2:
-                if st.button(_t("推送到 Webhook", "Push to webhook"), key="ws_push_webhooks"):
+                if st.button(
+                    _t("推送到 Webhook", "Push to webhook"),
+                    key="ws_push_webhooks",
+                    disabled=not _can_edit,
+                ):
                     _outcomes = _generation.push_webhooks(_sel, list_threats(project=_sel))
                     _ok = [o for o in _outcomes if o.get("ok")]
                     if _ok:

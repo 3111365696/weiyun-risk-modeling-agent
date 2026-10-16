@@ -13,6 +13,7 @@ from shared import (
     _interop,
     _standards,
     _t,
+    can_write_project,
     create_attack_tree_prompt,
     create_dfd_prompt,
     create_dread_assessment_prompt,
@@ -74,6 +75,17 @@ def _kind_label(kind: str) -> str:
     return KIND_LABELS.get(kind, kind)
 
 
+def _ensure_project_write(project: str) -> None:
+    """写操作前的项目权限检查（未配置成员的项目默认开放）。"""
+    if project and not can_write_project(project):
+        raise PermissionError(
+            _t(
+                f"没有项目「{project}」的编辑权限，请联系项目负责人添加你为成员。",
+                f"You don't have edit permission for project “{project}”. Ask the project owner to add you.",
+            )
+        )
+
+
 def _archive(
     kind: str,
     content_md: str,
@@ -97,6 +109,7 @@ def _archive(
         if not _project:
             _project = (_desc[:24] + "…") if len(_desc) > 24 else (_desc or _t("未命名项目", "Untitled project"))
         _used_project = _project
+        _ensure_project_write(_project)
         _generation.archive_result(
             kind,
             content_md,
@@ -347,6 +360,11 @@ def _run_model(kind: str, prompt: str):
 
 def _run_full_pipeline(project: str, description: str) -> None:
     """一键生成全套产物并归档到指定项目。"""
+    try:
+        _ensure_project_write(project)
+    except PermissionError as exc:
+        st.error(str(exc))
+        return
     _desc = (description or "").strip()
     if not _desc:
         st.warning(_t("请先填写并保存应用描述。", "Fill in and save the application description first."))

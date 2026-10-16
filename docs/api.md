@@ -27,6 +27,9 @@ uv run python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000
 X-API-Key: wy_xxxxxxxxxxxxxxxx
 
 > API Key 支持 `read` / `write` 作用域与有效期：只读密钥仅能调用 GET；
+> 项目级权限：项目可配置成员（owner/editor/viewer）。未配置成员的项目对所有登录用户开放；
+> 配置后非成员不可访问、viewer 只读、editor 可写、owner 可管理成员；全局管理员不受限。
+> API Key 的项目权限按其 `owner`（创建人）判定。
 > 生成/更新/删除需要 write。密钥可在「系统配置 → API 访问」轮换（旧密钥立即失效）。
 ```
 

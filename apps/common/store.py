@@ -345,6 +345,17 @@ def init_db() -> None:
             )
             """
         )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_members (
+                project TEXT NOT NULL,
+                username TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'editor',
+                created_at TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (project, username)
+            )
+            """
+        )
         # 增量迁移（老库补列）——必须放在所有建表之后
         _ensure_column(c, "api_keys", "daily_token_limit", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(c, "api_keys", "monthly_cost_limit", "REAL NOT NULL DEFAULT 0")
@@ -374,6 +385,7 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_schedules_enabled ON schedules(enabled)",
             "CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at)",
             "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)",
+            "CREATE INDEX IF NOT EXISTS idx_members_project ON project_members(project)",
         ):
             c.execute(ddl)
 
@@ -1259,6 +1271,108 @@ def set_user_password(username: str, password: str) -> None:
             (pw_hash, salt, username),
         )
     bump_session_epoch(username)
+
+
+# ---------------------------------------------------------------------------
+# P8：项目级权限（成员与角色）
+# ---------------------------------------------------------------------------
+
+PROJECT_ROLES = ("owner", "editor", "viewer")
+_ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
+
+
+def set_project_member(project: str, username: str, role: str = "editor") -> None:
+    """添加/更新项目成员。role ∈ owner/editor/viewer。"""
+    project = (project or "").strip()
+    username = (username or "").strip()
+    if not project or not username:
+        raise ValueError("项目与用户名不能为空")
+    if role not in PROJECT_ROLES:
+        raise ValueError(f"角色必须是 {PROJECT_ROLES}")
+    if not get_user(username):
+        raise ValueError(f"用户「{username}」不存在")
+    init_db()
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO project_members(project, username, role, created_at) VALUES(?, ?, ?, ?)"
+            " ON CONFLICT(project, username) DO UPDATE SET role = excluded.role",
+            (project, username, role, _now()),
+        )
+
+
+def remove_project_member(project: str, username: str) -> None:
+    init_db()
+    with _conn() as c:
+        c.execute(
+            "DELETE FROM project_members WHERE project = ? AND username = ?",
+            (project or "", username or ""),
+        )
+
+
+def list_project_members(project: str) -> list[dict]:
+    init_db()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT project, username, role, created_at FROM project_members"
+            " WHERE project = ? ORDER BY role DESC, username",
+            (project or "",),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def project_has_members(project: str) -> bool:
+    init_db()
+    with _conn() as c:
+        row = c.execute(
+            "SELECT 1 FROM project_members WHERE project = ? LIMIT 1", (project or "",)
+        ).fetchone()
+    return row is not None
+
+
+def project_role(project: str, username: str, *, is_admin: bool = False) -> str | None:
+    """返回用户在项目中的角色。
+
+    - 全局管理员（is_admin=True 或 users.role=admin）→ owner
+    - 显式成员 → 配置的角色
+    - 未配置任何成员的项目 → editor（保持历史行为；添加成员后即按角色收紧）
+    - 项目为空或用户名缺失 → None
+    """
+    project = (project or "").strip()
+    username = (username or "").strip()
+    if not project or not username:
+        return None
+    if is_admin:
+        return "owner"
+    user = get_user(username)
+    if user and user.get("role") == "admin":
+        return "owner"
+    for member in list_project_members(project):
+        if member["username"] == username:
+            return str(member["role"])
+    if not project_has_members(project):
+        return "editor"  # 未配置成员：视为开放项目（可在界面中添加成员后收紧）
+    return None
+
+
+def can_edit_project(project: str, username: str, *, is_admin: bool = False) -> bool:
+    role = project_role(project, username, is_admin=is_admin)
+    return bool(role and _ROLE_RANK.get(role, 0) >= _ROLE_RANK["editor"])
+
+
+def can_manage_project(project: str, username: str, *, is_admin: bool = False) -> bool:
+    """成员管理与删除等高风险操作：仅 owner（或全局管理员）。"""
+    role = project_role(project, username, is_admin=is_admin)
+    return role == "owner"
+
+
+def list_accessible_projects(username: str, *, is_admin: bool = False) -> list[dict]:
+    """当前用户可见的项目（未配置成员的开放项目对所有人可见）。"""
+    out = []
+    for project in list_projects():
+        role = project_role(project["name"], username, is_admin=is_admin)
+        if role:
+            out.append({**project, "role": role})
+    return out
 
 
 # ---------------------------------------------------------------------------

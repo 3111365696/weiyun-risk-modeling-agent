@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sys
 import threading
 import uuid
@@ -119,7 +120,38 @@ def require_api_key(
                 status_code=403,
                 detail="该 API Key 只有只读（read）作用域，无法执行写操作",
             )
+    request.state.api_key_info = info
     return info["name"]
+
+
+def api_actor(request: Request) -> dict:
+    """当前 API Key 的完整信息（含 owner），用于项目级权限判断。"""
+    return getattr(request.state, "api_key_info", {}) or {}
+
+
+def _owner_is_admin(owner: str) -> bool:
+    if (owner or "") == os.environ.get("STRIDE_GPT_USERNAME", "admin"):
+        return True
+    user = store.get_user(owner or "")
+    return bool(user and user.get("role") == "admin")
+
+
+def _ensure_project_access(project: str, actor: dict, *, write: bool) -> None:
+    """项目级权限：与 Web 一致（未配置成员的项目默认开放）。"""
+    if not project:
+        return
+    owner = str(actor.get("owner") or "")
+    is_admin = _owner_is_admin(owner)
+    allowed = (
+        store.can_edit_project(project, owner, is_admin=is_admin)
+        if write
+        else bool(store.project_role(project, owner, is_admin=is_admin))
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"没有项目「{project}」的{'编辑' if write else '访问'}权限",
+        )
 
 
 class Profile(BaseModel):
@@ -232,9 +264,12 @@ def _enforce_quota(api_key_name: str) -> None:
         raise HTTPException(status_code=429, detail=reason)
 
 
-def _generate_one(kind: str, req: GenerateRequest, api_key_name: str) -> dict:
+def _generate_one(
+    kind: str, req: GenerateRequest, api_key_name: str, actor: dict | None = None
+) -> dict:
     settings = _settings(req)
     project = _project_name(req)
+    _ensure_project_access(project, actor or {}, write=True)
     _enforce_quota(api_key_name)
     usage.set_call_context(actor=f"api:{api_key_name}", source="api", project=project)
     threats_md = req.threats_md or ""
@@ -326,39 +361,68 @@ def get_config(api_key_name: str = Depends(require_api_key)) -> dict:
 
 
 @app.post("/api/v1/threat-model", summary="生成 STRIDE 威胁模型")
-def api_threat_model(req: GenerateRequest, api_key_name: str = Depends(require_api_key)) -> dict:
-    return _generate_one("threat_model", req, api_key_name)
+def api_threat_model(
+    req: GenerateRequest,
+    request: Request,
+    api_key_name: str = Depends(require_api_key),
+) -> dict:
+    return _generate_one("threat_model", req, api_key_name, api_actor(request))
 
 
 @app.post("/api/v1/dfd", summary="生成数据流图（Mermaid）")
-def api_dfd(req: GenerateRequest, api_key_name: str = Depends(require_api_key)) -> dict:
-    return _generate_one("dfd", req, api_key_name)
+def api_dfd(
+    req: GenerateRequest,
+    request: Request,
+    api_key_name: str = Depends(require_api_key),
+) -> dict:
+    return _generate_one("dfd", req, api_key_name, api_actor(request))
 
 
 @app.post("/api/v1/attack-tree", summary="生成攻击树（Mermaid）")
-def api_attack_tree(req: GenerateRequest, api_key_name: str = Depends(require_api_key)) -> dict:
-    return _generate_one("attack_tree", req, api_key_name)
+def api_attack_tree(
+    req: GenerateRequest,
+    request: Request,
+    api_key_name: str = Depends(require_api_key),
+) -> dict:
+    return _generate_one("attack_tree", req, api_key_name, api_actor(request))
 
 
 @app.post("/api/v1/mitigations", summary="生成缓解措施")
-def api_mitigations(req: GenerateRequest, api_key_name: str = Depends(require_api_key)) -> dict:
-    return _generate_one("mitigations", req, api_key_name)
+def api_mitigations(
+    req: GenerateRequest,
+    request: Request,
+    api_key_name: str = Depends(require_api_key),
+) -> dict:
+    return _generate_one("mitigations", req, api_key_name, api_actor(request))
 
 
 @app.post("/api/v1/dread", summary="生成 DREAD 风险评估")
-def api_dread(req: GenerateRequest, api_key_name: str = Depends(require_api_key)) -> dict:
-    return _generate_one("dread", req, api_key_name)
+def api_dread(
+    req: GenerateRequest,
+    request: Request,
+    api_key_name: str = Depends(require_api_key),
+) -> dict:
+    return _generate_one("dread", req, api_key_name, api_actor(request))
 
 
 @app.post("/api/v1/test-cases", summary="生成 Gherkin 测试用例")
-def api_test_cases(req: GenerateRequest, api_key_name: str = Depends(require_api_key)) -> dict:
-    return _generate_one("test_cases", req, api_key_name)
+def api_test_cases(
+    req: GenerateRequest,
+    request: Request,
+    api_key_name: str = Depends(require_api_key),
+) -> dict:
+    return _generate_one("test_cases", req, api_key_name, api_actor(request))
 
 
 @app.post("/api/v1/full-pipeline", summary="一键生成全套产物")
-def api_full_pipeline(req: FullPipelineRequest, api_key_name: str = Depends(require_api_key)) -> dict:
+def api_full_pipeline(
+    req: FullPipelineRequest,
+    request: Request,
+    api_key_name: str = Depends(require_api_key),
+) -> dict:
     settings = _settings(req)
     project = _project_name(req)
+    _ensure_project_access(project, api_actor(request), write=True)
     _enforce_quota(api_key_name)
     usage.set_call_context(actor=f"api:{api_key_name}", source="api", project=project)
     results = generation.run_full_pipeline(
@@ -533,7 +597,10 @@ def api_verify_project(name: str, api_key_name: str = Depends(require_api_key)) 
 
 
 @app.get("/api/v1/projects/{name}/coverage", summary="STRIDE 覆盖度（最近一次威胁模型）")
-def api_project_coverage(name: str, api_key_name: str = Depends(require_api_key)) -> dict:
+def api_project_coverage(
+    name: str, request: Request, api_key_name: str = Depends(require_api_key)
+) -> dict:
+    _ensure_project_access(name, api_actor(request), write=False)
     models = generation.latest_threat_models(name, limit=1)
     if not models:
         raise HTTPException(status_code=404, detail=f"项目「{name}」还没有威胁模型报告")
@@ -541,7 +608,10 @@ def api_project_coverage(name: str, api_key_name: str = Depends(require_api_key)
 
 
 @app.get("/api/v1/projects/{name}/diff", summary="最近两次威胁模型差异（drift）")
-def api_project_diff(name: str, api_key_name: str = Depends(require_api_key)) -> dict:
+def api_project_diff(
+    name: str, request: Request, api_key_name: str = Depends(require_api_key)
+) -> dict:
+    _ensure_project_access(name, api_actor(request), write=False)
     diff = generation.diff_latest_threat_models(name)
     if diff is None:
         raise HTTPException(status_code=400, detail="至少需要两次威胁模型报告才能对比")
@@ -552,12 +622,14 @@ def api_project_diff(name: str, api_key_name: str = Depends(require_api_key)) ->
 def api_patch_threat(
     threat_id: int,
     patch: ThreatPatch,
+    request: Request,
     api_key_name: str = Depends(require_api_key),
 ) -> dict:
     rows = [t for t in store.list_threats() if t["id"] == threat_id]
     if not rows:
         raise HTTPException(status_code=404, detail="威胁条目不存在")
     current = rows[0]
+    _ensure_project_access(str(current.get("project") or ""), api_actor(request), write=True)
     store.update_threats(
         [
             {
@@ -572,7 +644,10 @@ def api_patch_threat(
 
 
 @app.post("/api/v1/projects/{name}/webhooks/push", summary="推送项目威胁台账到 Webhook")
-def api_push_webhooks(name: str, api_key_name: str = Depends(require_api_key)) -> dict:
+def api_push_webhooks(
+    name: str, request: Request, api_key_name: str = Depends(require_api_key)
+) -> dict:
+    _ensure_project_access(name, api_actor(request), write=True)
     threats = store.list_threats(project=name)
     if not threats:
         raise HTTPException(status_code=400, detail="该项目暂无威胁条目")

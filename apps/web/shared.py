@@ -507,6 +507,20 @@ _SESSION_DEFAULTS: dict = {
 }
 
 
+def can_write_project(project: str) -> bool:
+    """当前用户是否可编辑该项目（未配置成员的项目默认开放）。"""
+    return store.can_edit_project(
+        project, st.session_state.get("user", ""), is_admin=_is_admin()
+    )
+
+
+def can_manage_project(project: str) -> bool:
+    """当前用户是否可管理项目成员（owner / 全局管理员）。"""
+    return store.can_manage_project(
+        project, st.session_state.get("user", ""), is_admin=_is_admin()
+    )
+
+
 def _state(key: str, default=None):
     """读取会话状态（含默认值）；供从 main.py 拆出的页面模块使用。"""
     return st.session_state.get(key, _SESSION_DEFAULTS.get(key, default))
@@ -567,6 +581,8 @@ __all__ = [
     "backfill_project",
     "base64",
     "call_llm",
+    "can_manage_project",
+    "can_write_project",
     "clear_config",
     "config_saved_at",
     "create_attack_tree_prompt",
