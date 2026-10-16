@@ -15,6 +15,7 @@ from shared import (
     _logging,
     _scanners,
     _t,
+    _version,
     datetime,
     store,
 )
@@ -56,7 +57,7 @@ def render_status() -> None:
             _uptime = datetime.now() - _STARTED_AT
             _hours, _rest = divmod(int(_uptime.total_seconds()), 3600)
             st.markdown(
-                f"- {_t('产品版本', 'Product version')}：**{_backup.tool_version()}**\n"
+                f"- {_t('产品版本', 'Product version')}：**{_version.version_line()}**\n"
                 f"- {_t('进程运行时长', 'Process uptime')}：**{_hours} {_t('小时', 'h')} {_rest // 60} {_t('分钟', 'min')}**\n"
                 f"- Python：**{platform.python_version()}** · {platform.system()} {platform.machine()}\n"
                 f"- {_t('数据目录', 'Data directory')}：`{store.DATA_DIR}`\n"
@@ -117,6 +118,8 @@ def render_status() -> None:
                 _t("数据库", "Database"),
                 _integrity.lower() == "ok",
                 f"{_db.get('journal_mode', '?')} · {_fmt_bytes(_db.get('bytes', 0))} · "
+                + _t("结构版本", "schema")
+                + f" v{_db.get('schema_version', '?')} · "
                 + _t("完整性", "integrity")
                 + f" {_integrity}",
             )

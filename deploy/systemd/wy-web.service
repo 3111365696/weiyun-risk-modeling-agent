@@ -1,0 +1,27 @@
+# Web 控制台（Streamlit）
+# 安装：sudo cp deploy/systemd/wy-web.service /etc/systemd/system/
+#       sudo systemctl daemon-reload && sudo systemctl enable --now wy-web
+[Unit]
+Description=Weiyun Risk Modeling Agent - Web UI
+Documentation=file:/opt/wy/docs/ops-guide.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wy
+Group=wy
+WorkingDirectory=/opt/wy
+EnvironmentFile=/etc/wy/wy.env
+Environment=STRIDE_GPT_DATA_DIR=/var/lib/wy
+ExecStart=/opt/wy/.venv/bin/streamlit run apps/web/main.py --server.port 8501 --server.address 0.0.0.0 --server.headless true
+Restart=always
+RestartSec=3
+# 安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/wy
+
+[Install]
+WantedBy=multi-user.target

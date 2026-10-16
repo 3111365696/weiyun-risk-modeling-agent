@@ -1,0 +1,76 @@
+# 威云-风险建模智能体：一体化部署（Web UI + REST API + 定时调度器）
+#
+# 用法：
+#   cp .env.example .env         # 填 API Key 与登录口令
+#   docker compose up -d --build
+#   open http://localhost:8501
+#
+# 数据全部落在命名卷 wy-data（容器内 /data）：
+#   备份/恢复、数据库、加密配置、日志都在这里；升级容器不会丢数据。
+# 备份：docker compose exec web python -m common.backup create
+# 恢复：docker compose exec web python -m common.backup restore /data/backups/xxx.zip
+
+name: wy-stride
+
+x-common: &common
+  build:
+    context: .
+  environment: &common-env
+    STRIDE_GPT_DATA_DIR: /data
+    STRIDE_GPT_USERNAME: ${STRIDE_GPT_USERNAME:-admin}
+    STRIDE_GPT_PASSWORD: ${STRIDE_GPT_PASSWORD:?请在 .env 中设置 STRIDE_GPT_PASSWORD}
+    STRIDE_GPT_SESSION_DAYS: ${STRIDE_GPT_SESSION_DAYS:-7}
+    STRIDE_GPT_SECURE_COOKIE: ${STRIDE_GPT_SECURE_COOKIE:-}
+    STRIDE_GPT_LOG_LEVEL: ${STRIDE_GPT_LOG_LEVEL:-INFO}
+    STRIDE_GPT_API_URL: http://api:8000
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+    DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+    GROQ_API_KEY: ${GROQ_API_KEY:-}
+    GITHUB_API_KEY: ${GITHUB_API_KEY:-}
+  volumes:
+    - wy-data:/data
+  restart: unless-stopped
+
+services:
+  web:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    ports:
+      - "${WEB_PORT:-8501}:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8501/_stcore/health',timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  api:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/health',timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  scheduler:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    # 常驻调度器：每 60 秒检查一次到期计划；如需外部 cron，可改为 --once 并去掉 restart
+    command: ["python", "-m", "apps.scheduler.main", "--interval", "60"]
+    restart: unless-stopped
+
+volumes:
+  wy-data:

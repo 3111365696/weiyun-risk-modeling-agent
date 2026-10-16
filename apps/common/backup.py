@@ -50,14 +50,9 @@ def backup_dir() -> Path:
 
 
 def tool_version() -> str:
-    try:
-        import tomllib
+    from . import version
 
-        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
-        with pyproject.open("rb") as fh:
-            return str(tomllib.load(fh).get("project", {}).get("version") or "unknown")
-    except Exception:
-        return "unknown"
+    return version.package_version()
 
 
 def _sha256_bytes(data: bytes) -> str:

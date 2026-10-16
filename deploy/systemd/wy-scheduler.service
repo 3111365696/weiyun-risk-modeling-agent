@@ -1,0 +1,22 @@
+# 定时分析调度器
+[Unit]
+Description=Weiyun Risk Modeling Agent - Scheduler
+After=network-online.target
+
+[Service]
+Type=simple
+User=wy
+Group=wy
+WorkingDirectory=/opt/wy
+EnvironmentFile=/etc/wy/wy.env
+Environment=STRIDE_GPT_DATA_DIR=/var/lib/wy
+ExecStart=/opt/wy/.venv/bin/python -m apps.scheduler.main --interval 60
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/wy
+
+[Install]
+WantedBy=multi-user.target

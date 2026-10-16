@@ -23,7 +23,8 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
 
-DATA_DIR = Path.home() / ".stride-gpt"
+# 数据目录：默认 ~/.stride-gpt；Docker/systemd 部署可用 STRIDE_GPT_DATA_DIR 指定挂载点
+DATA_DIR = Path(os.environ.get("STRIDE_GPT_DATA_DIR") or (Path.home() / ".stride-gpt"))
 CONFIG_FILE = DATA_DIR / "web_config.json"
 KEY_FILE = DATA_DIR / "web_key"
 DB_FILE = DATA_DIR / "web.db"
@@ -161,7 +162,57 @@ def _conn() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+# 数据库结构演进记录：新增结构时追加一条（DDL 用幂等的 CREATE/ALTER，便于老库升级）。
+# 每条迁移在建表后写入 schema_migrations，升级脚本据此判断是否需要处理。
+MIGRATIONS: list[tuple[int, str]] = [
+    (1, "基础表：报告/项目/威胁/草稿/API Key/用量/计划/元数据/用户/审计/Webhook"),
+    (2, "P7：jobs 任务表（持久化、重启恢复、重跑）"),
+    (3, "P8：login_attempts（登录锁定）与 project_members（项目成员）"),
+    (4, "P8：api_keys 增加 scopes/expires_at/owner 与索引补齐"),
+]
+
+_SCHEMA_VERSION = max(version for version, _ in MIGRATIONS)
+_initialized: set[str] = set()
+
+
+def _record_migrations(conn: sqlite3.Connection) -> None:
+    applied = {
+        int(row[0])
+        for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+    }
+    for version, description in MIGRATIONS:
+        if version in applied:
+            continue
+        conn.execute(
+            "INSERT INTO schema_migrations(version, description, applied_at) VALUES(?, ?, ?)",
+            (version, description, _now()),
+        )
+
+
+def schema_version() -> int:
+    """当前已应用的数据库结构版本。"""
+    try:
+        init_db()
+        with _conn() as c:
+            row = c.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
+        return int(row[0] or 0)
+    except Exception:
+        return 0
+
+
+def migration_history() -> list[dict]:
+    init_db()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT version, description, applied_at FROM schema_migrations ORDER BY version"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def init_db() -> None:
+    cache_key = str(DB_FILE)
+    if cache_key in _initialized and Path(DB_FILE).exists():
+        return
     with _conn() as c:
         c.execute(
             """
@@ -356,6 +407,15 @@ def init_db() -> None:
             )
             """
         )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL DEFAULT '',
+                applied_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
         # 增量迁移（老库补列）——必须放在所有建表之后
         _ensure_column(c, "api_keys", "daily_token_limit", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(c, "api_keys", "monthly_cost_limit", "REAL NOT NULL DEFAULT 0")
@@ -370,6 +430,7 @@ def init_db() -> None:
         _ensure_column(c, "api_keys", "scopes", "TEXT NOT NULL DEFAULT 'read,write'")
         _ensure_column(c, "api_keys", "expires_at", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(c, "api_keys", "owner", "TEXT NOT NULL DEFAULT ''")
+        _record_migrations(c)
         for ddl in (
             "CREATE INDEX IF NOT EXISTS idx_reports_project ON reports(project)",
             "CREATE INDEX IF NOT EXISTS idx_reports_kind ON reports(kind)",
@@ -388,6 +449,7 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_members_project ON project_members(project)",
         ):
             c.execute(ddl)
+    _initialized.add(cache_key)
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -1737,6 +1799,7 @@ def db_stats() -> dict:
         "wal_bytes": wal.stat().st_size if wal.exists() else 0,
         "shm_bytes": shm.stat().st_size if shm.exists() else 0,
         "journal_mode": "",
+        "schema_version": _SCHEMA_VERSION,
         "page_count": 0,
         "page_size": 0,
         "tables": {},

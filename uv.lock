@@ -2763,7 +2763,7 @@ wheels = [
 
 [[package]]
 name = "stride-gpt"
-version = "0.20.0"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "defusedxml" },

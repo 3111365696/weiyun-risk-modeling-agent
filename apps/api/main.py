@@ -27,11 +27,12 @@ for _p in (_REPO_ROOT, _APPS_DIR):
 
 from common import agentic, generation, store, usage  # noqa: E402
 from common import logging_setup as _logging  # noqa: E402
+from common import version as _version  # noqa: E402
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
-VERSION = "0.20.0"
+VERSION = _version.package_version()
 
 _logging.setup("api")
 _log = _logging.get_logger("api")
@@ -338,6 +339,7 @@ def health() -> dict:
         "ok": db_ok,
         "service": "weiyun-stride-gpt",
         "version": VERSION,
+        "commit": _version.git_commit(),
         "database": "ok" if db_ok else "error",
         "uptime_seconds": uptime,
         "started_at": _STARTED_AT.strftime("%Y-%m-%d %H:%M:%S"),

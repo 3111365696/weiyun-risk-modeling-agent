@@ -1,0 +1,34 @@
+# API 与调度器镜像（同一镜像，不同启动命令）。
+# Web UI 使用 Dockerfile.ui。
+FROM python:3.12-slim@sha256:dddfd7e07f9d15aeeca61529320492139d21cac7f0070c00609243e51e4e0016
+
+ENV PYTHONUNBUFFERED=1
+ENV PIP_ROOT_USER_ACTION=ignore
+
+RUN apt-get update && \
+    apt-get upgrade -y --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid 1000 appuser && \
+    useradd --uid 1000 --gid 1000 -ms /bin/bash appuser && \
+    pip install --no-cache-dir --upgrade pip
+
+WORKDIR /home/appuser
+COPY --chown=appuser:appuser . /home/appuser
+
+USER appuser
+ENV PATH="$PATH:/home/appuser/.local/bin:/home/appuser/.local/lib:/home/appuser/venv/bin"
+ENV VIRTUAL_ENV=/home/appuser/venv
+
+RUN python -m venv ${VIRTUAL_ENV} && \
+    ${VIRTUAL_ENV}/bin/pip install --no-cache-dir --upgrade pip uv && \
+    ${VIRTUAL_ENV}/bin/uv export --frozen --no-dev --no-emit-project --no-hashes \
+        -o /tmp/requirements.lock && \
+    ${VIRTUAL_ENV}/bin/pip install --no-cache-dir -r /tmp/requirements.lock && \
+    ${VIRTUAL_ENV}/bin/pip check
+
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=4).status == 200 else 1)" || exit 1
+
+ENTRYPOINT ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

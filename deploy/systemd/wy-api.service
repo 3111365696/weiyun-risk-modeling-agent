@@ -1,0 +1,23 @@
+# REST API（FastAPI/uvicorn）
+[Unit]
+Description=Weiyun Risk Modeling Agent - REST API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wy
+Group=wy
+WorkingDirectory=/opt/wy
+EnvironmentFile=/etc/wy/wy.env
+Environment=STRIDE_GPT_DATA_DIR=/var/lib/wy
+ExecStart=/opt/wy/.venv/bin/python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/wy
+
+[Install]
+WantedBy=multi-user.target

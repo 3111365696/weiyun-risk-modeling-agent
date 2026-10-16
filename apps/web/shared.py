@@ -59,6 +59,7 @@ from common import scanners as _scanners
 from common import standards as _standards
 from common import store
 from common import usage as _usage
+from common import version as _version
 from common.store import (
     KIND_LABELS,
     PERSIST_KEYS,
@@ -160,12 +161,7 @@ from stride_gpt.core.schemas import LLMConfig
 from stride_gpt.models import PROVIDERS as _PROVIDERS
 from stride_gpt.models import get_model, get_models_for_provider, model_supports_thinking
 
-try:
-    from importlib.metadata import version as _pkg_version
-
-    _APP_VERSION = _pkg_version("stride-gpt")
-except Exception:  # pragma: no cover - 包元数据缺失时回退
-    _APP_VERSION = "0.20.0"
+_APP_VERSION = _version.package_version()
 
 _t = _i18n.t
 
