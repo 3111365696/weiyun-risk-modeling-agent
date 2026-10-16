@@ -12,6 +12,7 @@ if str(_REPO_ROOT) not in sys.path:
 import base64
 import hmac
 import html
+import json
 import os
 from datetime import datetime
 import re
@@ -93,6 +94,22 @@ from threat_model import (
     get_threat_model_lm_studio,
     get_threat_model_mistral,
     json_to_markdown,
+)
+
+from store import (
+    KIND_LABELS,
+    PERSIST_KEYS,
+    clear_config,
+    config_saved_at,
+    delete_report,
+    load_config,
+    export_zip,
+    get_report,
+    list_reports,
+    report_count,
+    report_to_html,
+    save_config,
+    save_report,
 )
 
 from stride_gpt.core.drawio_parser import drawio_to_prompt_section
@@ -927,6 +944,11 @@ load_env_variables()
 from stride_gpt.models import PROVIDERS as _PROVIDERS
 from stride_gpt.models import get_model, get_models_for_provider, model_supports_thinking
 
+# 载入服务端保存的配置（覆盖 .env 中的同名值）
+for _cfg_key, _cfg_val in load_config().items():
+    if _cfg_val not in (None, ""):
+        st.session_state[_cfg_key] = _cfg_val
+
 # 配置默认值（可在「系统配置」界面修改）
 if "model_provider" not in st.session_state:
     st.session_state["model_provider"] = "OpenAI API"
@@ -1111,8 +1133,15 @@ h3 { font-size: 1.08rem !important; }
 }
 
 /* 页面标题头 */
+.sg-kicker {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: .76rem; letter-spacing: .3em; color: #8E82C8;
+}
 .sg-page-head { margin: .1rem 0 1rem; }
 .sg-page-title { font-size: 1.45rem; font-weight: 650; color: #EDEBF5; letter-spacing: .01em; margin-top: .2rem; }
+
+/* 报告历史 */
+.sg-rep-meta { color: #948EA8; font-size: .78rem; }
 
 /* 系统配置页 */
 .sg-settings-head { margin: .1rem 0 1.1rem; }
@@ -1188,12 +1217,12 @@ _LOGIN_CSS = """
 [data-testid="stMain"], .block-container { position: relative; z-index: 2; }
 
 /* 左侧品牌区 */
-.sg-hero { padding: 12vh 0 0 3vw; }
+.sg-hero { padding: 13vh 0 0 4vw; }
 .sg-kicker {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: .78rem; letter-spacing: .3em; color: #8E82C8;
+  font-size: .86rem; letter-spacing: .32em; color: #8E82C8;
 }
-.sg-mark { width: 128px; height: 128px; margin: 1.3rem 0 .7rem; filter: drop-shadow(0 0 24px rgba(124,107,214,.4)); }
+.sg-mark { width: 152px; height: 152px; margin: 1.5rem 0 .9rem; filter: drop-shadow(0 0 28px rgba(124,107,214,.42)); }
 .sg-shield { stroke-dasharray: 580; stroke-dashoffset: 580; animation: sg-draw 2.4s cubic-bezier(.4,0,.2,1) forwards; }
 .sg-wire { stroke: rgba(169,154,240,.5); stroke-width: 1.2; stroke-dasharray: 5 6; animation: sg-flow 3.2s linear infinite; }
 .sg-node { fill: #C3B8FF; animation: sg-pulse 2.6s ease-in-out infinite; }
@@ -1205,27 +1234,27 @@ _LOGIN_CSS = """
 @keyframes sg-flow { to { stroke-dashoffset: -22; } }
 @keyframes sg-pulse { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
 .sg-hero-title {
-  font-size: 2.8rem; font-weight: 700; line-height: 1.22; letter-spacing: .01em; margin: .25rem 0 .85rem;
+  font-size: 3.4rem; font-weight: 700; line-height: 1.2; letter-spacing: .01em; margin: .3rem 0 1rem;
   background: linear-gradient(115deg, #FFFFFF 0%, #D6CDFF 52%, #9B8BEA 100%);
   -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
 }
-.sg-hero-desc { color: #A29BB8; font-size: 1.02rem; line-height: 1.9; max-width: 36rem; margin: 0 0 1.1rem; }
+.sg-hero-desc { color: #A29BB8; font-size: 1.16rem; line-height: 1.9; max-width: 41rem; margin: 0 0 1.4rem; }
 
 /* 能力卡片 2x2 */
-.sg-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; max-width: 41rem; margin-top: .4rem; }
+.sg-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .95rem; max-width: 47rem; margin-top: .6rem; }
 .sg-tile {
   border: 1px solid rgba(124,107,214,.18); background: rgba(24,21,34,.55);
-  border-radius: 10px; padding: .9rem 1rem; transition: border-color .15s ease, background .15s ease;
+  border-radius: 12px; padding: 1.15rem 1.3rem; transition: border-color .15s ease, background .15s ease;
 }
 .sg-tile:hover { border-color: rgba(124,107,214,.42); background: rgba(30,26,44,.7); }
-.sg-tile-title { display: flex; align-items: center; gap: .5rem; font-size: .95rem; font-weight: 600; color: #E4E0F0; margin-bottom: .3rem; }
-.sg-tile-dot { width: 6px; height: 6px; border-radius: 50%; background: #7C6BD6; box-shadow: 0 0 9px rgba(124,107,214,.95); flex: none; }
-.sg-tile-desc { font-size: .82rem; color: #9993AC; line-height: 1.65; }
+.sg-tile-title { display: flex; align-items: center; gap: .55rem; font-size: 1.06rem; font-weight: 600; color: #E4E0F0; margin-bottom: .38rem; }
+.sg-tile-dot { width: 7px; height: 7px; border-radius: 50%; background: #7C6BD6; box-shadow: 0 0 9px rgba(124,107,214,.95); flex: none; }
+.sg-tile-desc { font-size: .9rem; color: #9993AC; line-height: 1.7; }
 
 /* 控制台就绪行 */
 .sg-console {
-  margin-top: 1.5rem; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: .8rem; color: #7A7490;
+  margin-top: 1.9rem; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: .9rem; color: #7A7490;
 }
 .sg-console .ok { color: #38B26A; }
 .sg-cursor {
@@ -1233,8 +1262,8 @@ _LOGIN_CSS = """
   margin-left: .35em; vertical-align: -2px; animation: sg-blink 1.1s steps(1) infinite;
 }
 .sg-status {
-  display: flex; gap: 1.8rem; align-items: center; margin-top: 2.4rem;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .8rem; color: #7F7A93;
+  display: flex; gap: 2.2rem; align-items: center; margin-top: 2.9rem;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .88rem; color: #7F7A93;
 }
 .sg-dot {
   display: inline-block; width: 7px; height: 7px; border-radius: 50%;
@@ -1245,13 +1274,13 @@ _LOGIN_CSS = """
 
 /* 右侧登录卡片 */
 .st-key-login_card {
-  margin-top: 12vh !important;
-  padding: 2rem 2.1rem 1.5rem !important;
+  margin-top: 13vh !important;
+  padding: 2.7rem 2.8rem 2.1rem !important;
   background: rgba(24, 21, 34, .74) !important;
   backdrop-filter: blur(12px);
   border: 1px solid rgba(124, 107, 214, .26) !important;
-  border-radius: 12px !important;
-  box-shadow: 0 24px 70px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.05) !important;
+  border-radius: 14px !important;
+  box-shadow: 0 28px 80px rgba(0,0,0,.52), inset 0 1px 0 rgba(255,255,255,.05) !important;
   position: relative; overflow: hidden;
 }
 .st-key-login_card::before {
@@ -1262,24 +1291,25 @@ _LOGIN_CSS = """
 [data-testid="stIFrame"], iframe { display: none !important; }
 /* 隐藏 Streamlit 内置英文提示（仅登录页） */
 [data-testid="InputInstructions"] { display: none !important; }
-.sg-card-title { font-size: 1.9rem; font-weight: 650; color: #F1EFF8; margin: .45rem 0 .2rem; }
-.sg-card-sub { color: #948EA8; font-size: .95rem; margin-bottom: 1.3rem; }
+.sg-card-title { font-size: 2.35rem; font-weight: 650; color: #F1EFF8; margin: .55rem 0 .3rem; }
+.sg-card-sub { color: #948EA8; font-size: 1.06rem; margin-bottom: 1.7rem; }
 .sg-card-foot {
-  margin-top: 1.3rem; text-align: center; font-size: .78rem; color: #6E6883;
+  margin-top: 1.7rem; text-align: center; font-size: .85rem; color: #6E6883;
   font-family: ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .04em;
 }
 /* 表单控件整体放大 */
-[data-baseweb="input"] { min-height: 3rem; }
-[data-testid="stTextInput"] input { font-size: 1rem; }
-[data-testid="stBaseButton-primaryFormSubmit"] { min-height: 3.15rem; font-size: 1.05rem; }
+[data-baseweb="input"] { min-height: 3.5rem; }
+[data-testid="stTextInput"] input { font-size: 1.12rem; }
+[data-testid="stTextInput"] label p { font-size: .98rem; }
+[data-testid="stBaseButton-primaryFormSubmit"] { min-height: 3.7rem; font-size: 1.18rem; }
 /* 登录页内容区更宽、给底栏留位 */
-[data-testid="stMain"] .block-container { max-width: 1440px; padding-bottom: 5rem; }
+[data-testid="stMain"] .block-container { max-width: 1620px; padding-bottom: 6rem; }
 /* 底栏 */
 .sg-footbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
   display: flex; justify-content: space-between; gap: 1rem; align-items: center;
-  padding: .65rem 2.2rem; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: .74rem; color: #6E6883;
+  padding: .85rem 2.8rem; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: .83rem; color: #6E6883;
   background: rgba(12,10,18,.72); backdrop-filter: blur(10px);
   border-top: 1px solid rgba(124,107,214,.16);
 }
@@ -1449,6 +1479,13 @@ def _logout_dialog() -> None:
 
 
 if not st.session_state.get("authenticated"):
+    # 记住深链目标（刷新 / 分享链接进入时），登录成功后跳转
+    try:
+        _pending_path = (urlparse(st.context.url or "").path or "/").strip("/")
+    except Exception:
+        _pending_path = ""
+    if _pending_path:
+        st.session_state["_pending_path"] = _pending_path
     render_login()
     st.stop()
 
@@ -1665,23 +1702,20 @@ def render_settings() -> None:
                 st.markdown(_provider_info.setup_instructions)
                 _endpoint = st.text_input(
                     "LM Studio Server 端点",
-                    value=st.session_state.get("lm_studio_endpoint", "http://localhost:1234"),
+                    key="lm_studio_endpoint",
                     help="你的 LM Studio Server 实例 URL。本地安装默认是 http://localhost:1234。",
                 )
-                _lm_key = st.text_input(
+                st.text_input(
                     "LM Studio API Key（可选）",
-                    value=st.session_state.get("lm_studio_api_key", ""),
                     type="password",
+                    key="lm_studio_api_key",
                     help="如果服务器不需要鉴权，请留空。",
                 )
-                if _lm_key:
-                    st.session_state["lm_studio_api_key"] = _lm_key
                 _available = ["local-model"]
                 if _endpoint:
                     if not _endpoint.startswith(("http://", "https://")):
                         st.error("端点 URL 必须以 http:// 或 https:// 开头")
                     else:
-                        st.session_state["lm_studio_endpoint"] = _endpoint
                         _available = get_lm_studio_models(
                             _endpoint, st.session_state.get("lm_studio_api_key", "")
                         )
@@ -1697,14 +1731,12 @@ def render_settings() -> None:
                 st.markdown(_info.setup_instructions)
                 _session_key = PROVIDER_API_KEY_STATE.get(_provider, "")
                 if _session_key:
-                    _key_val = st.text_input(
+                    st.text_input(
                         f"{_info.name} API Key",
-                        value=st.session_state.get(_session_key, ""),
                         type="password",
+                        key=_session_key,
                         help=f"你可以在以下位置找到 API Key：[{_info.name}]({_info.api_key_url})。",
                     )
-                    if _key_val:
-                        st.session_state[_session_key] = _key_val
                 _model_list = get_models_for_provider(_provider)
                 st.selectbox(
                     "默认模型",
@@ -1746,14 +1778,12 @@ def render_settings() -> None:
         with st.container(border=True, key="settings_github"):
             st.markdown("#### GitHub 集成")
             st.caption("可选。配置后可直接分析 GitHub 仓库；细粒度令牌需具备 Contents: read-only 权限。")
-            _gh_val = st.text_input(
+            st.text_input(
                 "GitHub API Key（可选）",
-                value=st.session_state.get("github_api_key", ""),
                 type="password",
+                key="github_api_key",
                 help="在 GitHub 账户设置 Developer settings > Personal access tokens 中创建。",
             )
-            if _gh_val:
-                st.session_state["github_api_key"] = _gh_val
 
         with st.container(border=True, key="settings_advanced"):
             st.markdown("#### 分析参数")
@@ -1780,7 +1810,25 @@ def render_settings() -> None:
             )
             st.session_state["token_limit"] = _token_limit
 
-        st.caption("修改即时生效，保存在当前浏览器会话中；如需重启后保留，请写入项目根目录的 .env 文件。")
+        _save_col, _clear_col = st.columns(2)
+        with _save_col:
+            if st.button(
+                "保存配置到服务端", key="save_server_config", type="primary", use_container_width=True
+            ):
+                _saved_at = save_config({k: st.session_state.get(k) for k in PERSIST_KEYS})
+                st.session_state["_config_saved_at"] = _saved_at
+                st.success("配置已加密保存，重启服务后仍然生效。")
+        with _clear_col:
+            if st.button("清除已保存配置", key="clear_server_config", use_container_width=True):
+                clear_config()
+                st.session_state["_config_saved_at"] = None
+                st.warning("已清除服务端配置（当前会话中的值仍保留）。")
+        _saved_at = st.session_state.get("_config_saved_at") or config_saved_at()
+        st.caption(
+            f"当前会话中的修改即时生效；上次保存到服务端：{_saved_at}。"
+            if _saved_at
+            else "当前会话中的修改即时生效；点击「保存配置到服务端」后重启仍生效。"
+        )
 
 
 # ------------------ Main App UI ------------------ #
@@ -1831,15 +1879,7 @@ if st.session_state.get("view") == "settings":
     render_settings()
     st.stop()
 
-# 顶部页面导航（六个页面始终可见，威胁模型为首页）
-_PAGE_OPTIONS = ["威胁模型", "攻击树", "数据流图", "缓解措施", "DREAD 风险评估", "测试用例"]
-st.segmented_control(
-    "页面导航",
-    _PAGE_OPTIONS,
-    default="威胁模型",
-    key="nav_page",
-    label_visibility="collapsed",
-)
+# （页面导航控件在文件末尾随路由一起注册）
 
 
 def _page_threat_model() -> None:
@@ -2027,6 +2067,12 @@ def _page_threat_model() -> None:
 
     # Create input fields for additional details
     with col2:
+        st.text_input(
+            "项目名称（用于报告归档）",
+            key="project_name",
+            placeholder="留空则按应用描述自动取名",
+            help="生成结果会按项目名称归档到「报告历史」页面。",
+        )
         app_type = st.selectbox(
             label="选择应用类型",
             options=[
@@ -2196,6 +2242,14 @@ def _page_threat_model() -> None:
                     st.session_state["threat_model_markdown"] = json_to_markdown(
                         threat_model, improvement_suggestions
                     )
+                    _archive(
+                        "threat_model",
+                        st.session_state["threat_model_markdown"],
+                        {
+                            "threat_model": threat_model,
+                            "improvement_suggestions": improvement_suggestions,
+                        },
+                    )
                     break  # Exit the loop if successful
                 except Exception as e:
                     retry_count += 1
@@ -2338,6 +2392,7 @@ def _page_attack_tree() -> None:
                         with st.expander(f"查看 {thinking_model} 的思考过程"):
                             st.markdown(st.session_state["last_thinking_content"])
 
+                    _archive("attack_tree", mermaid_code)
                     # Display the generated attack tree code
                     st.write("攻击树代码：")
                     st.code(mermaid_code)
@@ -2484,6 +2539,7 @@ def _page_data_flow() -> None:
                     # needs to re-tick "Use this DFD" to opt back in.
                     st.session_state["dfd_mermaid"] = dfd_mermaid
                     st.session_state.pop("confirmed_dfd", None)
+                    _archive("dfd", dfd_mermaid)
                 except Exception as e:
                     st.error(f"生成 DFD 失败：{e}")
     elif dfd_generate_button and not st.session_state.get("app_input"):
@@ -2525,6 +2581,7 @@ def _page_data_flow() -> None:
                         st.session_state["dfd_mermaid"] = dfd_mermaid
                         st.session_state["dfd_last_upload_key"] = upload_key
                         st.session_state.pop("confirmed_dfd", None)
+                        _archive("dfd", dfd_mermaid)
                     except Exception as e:
                         st.error(f"解析 DFD 图片失败：{e}")
 
@@ -2677,6 +2734,7 @@ def _page_mitigations() -> None:
                             with st.expander(f"查看 {thinking_model} 的思考过程"):
                                 st.markdown(st.session_state["last_thinking_content"])
 
+                        _archive("mitigations", mitigations_markdown)
                         # Display the suggested mitigations in Markdown
                         st.markdown(mitigations_markdown)
 
@@ -2796,6 +2854,7 @@ DREAD 是一种评估和排序安全威胁风险的方法，从 **D**amage poten
                             )
             # Convert the DREAD assessment JSON to Markdown
             dread_assessment_markdown = dread_json_to_markdown(dread_assessment)
+            _archive("dread", dread_assessment_markdown, dread_assessment)
 
             # Add debug information about the assessment
             if not dread_assessment.get("Risk Assessment"):
@@ -2929,6 +2988,7 @@ def _page_test_cases() -> None:
                             with st.expander(f"查看 {thinking_model} 的思考过程"):
                                 st.markdown(st.session_state["last_thinking_content"])
 
+                        _archive("test_cases", test_cases_markdown)
                         # Display the suggested mitigations in Markdown
                         st.markdown(test_cases_markdown)
 
@@ -2961,7 +3021,157 @@ def _page_test_cases() -> None:
             st.error("请先生成威胁模型，再请求测试用例。")
 
 
-# ------------------ 页面调度 ------------------ #
+def _archive(kind: str, content_md: str, content_json=None) -> None:
+    """把生成结果归档到「报告历史」（失败不影响生成结果展示）。"""
+    if not content_md:
+        return
+    try:
+        _desc = (st.session_state.get("app_input") or "").strip()
+        _project = (st.session_state.get("project_name") or "").strip()
+        if not _project:
+            _project = (_desc[:24] + "…") if len(_desc) > 24 else (_desc or "未命名项目")
+        save_report(
+            kind=kind,
+            title=f"{KIND_LABELS.get(kind, kind)} · {_project}",
+            project=_project,
+            content_md=content_md,
+            content_json=json.dumps(content_json, ensure_ascii=False) if content_json else None,
+            provider=st.session_state.get("model_provider", ""),
+            model=st.session_state.get("selected_model", ""),
+        )
+        st.toast("已归档到「报告历史」")
+    except Exception:
+        pass
+
+
+@st.dialog("报告详情", width="large")
+def _report_dialog(report: dict) -> None:
+    st.caption(
+        f"{KIND_LABELS.get(report['kind'], report['kind'])} · {report['project'] or '未命名'}"
+        f" · {report['created_at']} · {report['provider']}/{report['model']}"
+    )
+    st.markdown(report["content_md"])
+    _d1, _d2, _d3, _d4 = st.columns(4)
+    with _d1:
+        st.download_button(
+            "下载 Markdown",
+            data=report["content_md"],
+            file_name=f"report-{report['id']}.md",
+            mime="text/markdown",
+            key=f"dlg_md_{report['id']}",
+            use_container_width=True,
+        )
+    with _d2:
+        st.download_button(
+            "下载 HTML",
+            data=report_to_html(report),
+            file_name=f"report-{report['id']}.html",
+            mime="text/html",
+            key=f"dlg_html_{report['id']}",
+            use_container_width=True,
+        )
+    with _d3:
+        if report.get("content_json"):
+            st.download_button(
+                "下载 JSON",
+                data=report["content_json"],
+                file_name=f"report-{report['id']}.json",
+                mime="application/json",
+                key=f"dlg_json_{report['id']}",
+                use_container_width=True,
+            )
+    with _d4:
+        if st.button("关闭", key=f"dlg_close_{report['id']}", use_container_width=True):
+            st.session_state.pop("_report_view_id", None)
+            st.rerun()
+
+
+def _page_reports() -> None:
+    """报告历史：查看、导出、删除历史生成结果。"""
+    _rows = list_reports(limit=300)
+    _projects = sorted({r["project"] for r in _rows if r["project"]})
+
+    _f1, _f2, _f3, _f4 = st.columns([1.1, 1.3, 2, 1.3], vertical_alignment="bottom")
+    with _f1:
+        _kind_label = st.selectbox("类型", ["全部", *KIND_LABELS.values()], key="hist_kind")
+    with _f2:
+        _project = st.selectbox("项目", ["全部", *_projects], key="hist_project")
+    with _f3:
+        _search = st.text_input(
+            "搜索", key="hist_search", placeholder="按标题 / 项目 / 内容关键字"
+        )
+    with _f4:
+        st.download_button(
+            "导出全部 (ZIP)",
+            data=export_zip(_rows),
+            file_name=f"weiyun-reports-{datetime.now().strftime('%Y%m%d-%H%M')}.zip",
+            mime="application/zip",
+            use_container_width=True,
+            disabled=not _rows,
+        )
+
+    _kind_rev = {v: k for k, v in KIND_LABELS.items()}
+    _filtered = list_reports(
+        kind=None if _kind_label == "全部" else _kind_rev.get(_kind_label),
+        project=None if _project == "全部" else _project,
+        search=_search or None,
+        limit=300,
+    )
+
+    st.caption(f"共 {len(_filtered)} 条记录（库内总计 {report_count()} 条）")
+    if not _filtered:
+        st.info("暂无历史报告。生成威胁模型、攻击树、数据流图等结果后会自动归档到这里。")
+        return
+
+    for _r in _filtered:
+        with st.container(border=True):
+            _c1, _c2 = st.columns([5, 2.6], vertical_alignment="center")
+            with _c1:
+                st.markdown(
+                    f"**{KIND_LABELS.get(_r['kind'], _r['kind'])}** · {_r['project'] or '未命名'}"
+                    f"  \n<span class='sg-rep-meta'>{_r['created_at']} · "
+                    f"{_r['provider']}/{_r['model']}</span>",
+                    unsafe_allow_html=True,
+                )
+            with _c2:
+                _b1, _b2, _b3, _b4 = st.columns(4)
+                with _b1:
+                    if st.button("查看", key=f"view_{_r['id']}", use_container_width=True):
+                        st.session_state["_report_view_id"] = _r["id"]
+                        st.rerun()
+                with _b2:
+                    st.download_button(
+                        "MD",
+                        data=_r["content_md"],
+                        file_name=f"report-{_r['id']}.md",
+                        mime="text/markdown",
+                        key=f"md_{_r['id']}",
+                        use_container_width=True,
+                    )
+                with _b3:
+                    st.download_button(
+                        "HTML",
+                        data=report_to_html(_r),
+                        file_name=f"report-{_r['id']}.html",
+                        mime="text/html",
+                        key=f"html_{_r['id']}",
+                        use_container_width=True,
+                    )
+                with _b4:
+                    if st.button("删除", key=f"del_{_r['id']}", use_container_width=True):
+                        delete_report(_r["id"])
+                        st.rerun()
+
+    _view_id = st.session_state.get("_report_view_id")
+    if _view_id:
+        _rep = get_report(int(_view_id))
+        if _rep:
+            _report_dialog(_rep)
+        else:
+            st.session_state.pop("_report_view_id", None)
+
+
+# ------------------ 页面路由（独立 URL） ------------------ #
 
 _PAGE_HEADERS = {
     "威胁模型": ("THREAT MODEL", "威胁模型"),
@@ -2970,10 +3180,53 @@ _PAGE_HEADERS = {
     "缓解措施": ("MITIGATIONS", "缓解措施"),
     "DREAD 风险评估": ("DREAD", "DREAD 风险评估"),
     "测试用例": ("TEST CASES", "测试用例"),
+    "报告历史": ("REPORTS", "报告历史"),
 }
 
-_nav_page = st.session_state.get("nav_page") or "威胁模型"
-_kicker, _title = _PAGE_HEADERS.get(_nav_page, _PAGE_HEADERS["威胁模型"])
+# 六个页面注册为独立路由：每页有自己的地址（可刷新 / 收藏 / 分享）
+_PAGE_PAGES = {
+    "威胁模型": st.Page(_page_threat_model, title="威胁模型", url_path="threat-model", default=True),
+    "攻击树": st.Page(_page_attack_tree, title="攻击树", url_path="attack-tree"),
+    "数据流图": st.Page(_page_data_flow, title="数据流图", url_path="data-flow-diagram"),
+    "缓解措施": st.Page(_page_mitigations, title="缓解措施", url_path="mitigations"),
+    "DREAD 风险评估": st.Page(_page_dread, title="DREAD 风险评估", url_path="dread"),
+    "测试用例": st.Page(_page_test_cases, title="测试用例", url_path="test-cases"),
+    "报告历史": st.Page(_page_reports, title="报告历史", url_path="reports"),
+}
+
+_pg = st.navigation(list(_PAGE_PAGES.values()), position="hidden")
+
+# 登录后跳转回进入前的深链目标
+_PATH_TO_TITLE = {
+    "threat-model": "威胁模型",
+    "attack-tree": "攻击树",
+    "data-flow-diagram": "数据流图",
+    "mitigations": "缓解措施",
+    "dread": "DREAD 风险评估",
+    "test-cases": "测试用例",
+    "reports": "报告历史",
+}
+_pending_path = st.session_state.pop("_pending_path", None)
+if _pending_path:
+    _target_title = _PATH_TO_TITLE.get(_pending_path)
+    if _target_title and _target_title != _pg.title:
+        st.switch_page(_PAGE_PAGES[_target_title])
+
+# 页面变化（导航点击 / 深链 / 浏览器前进后退）时先同步导航控件值
+if st.session_state.get("_current_page") != _pg.title:
+    st.session_state["_current_page"] = _pg.title
+    st.session_state["nav_page"] = _pg.title
+
+_nav = st.segmented_control(
+    "页面导航",
+    list(_PAGE_PAGES),
+    key="nav_page",
+    label_visibility="collapsed",
+)
+if _nav and _nav != _pg.title:
+    st.switch_page(_PAGE_PAGES[_nav])
+
+_kicker, _title = _PAGE_HEADERS.get(_pg.title, _PAGE_HEADERS["威胁模型"])
 st.markdown(
     f"""
     <div class="sg-page-head">
@@ -2984,15 +3237,4 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if _nav_page == "攻击树":
-    _page_attack_tree()
-elif _nav_page == "数据流图":
-    _page_data_flow()
-elif _nav_page == "缓解措施":
-    _page_mitigations()
-elif _nav_page == "DREAD 风险评估":
-    _page_dread()
-elif _nav_page == "测试用例":
-    _page_test_cases()
-else:
-    _page_threat_model()
+_pg.run()
