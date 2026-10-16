@@ -145,6 +145,7 @@ def build_prompt(kind: str, profile: dict, description: str, threats_md: str = "
 
 def run_generation(kind: str, prompt: str, settings: dict) -> tuple[str, dict | None]:
     """调用模型生成一类产物，返回 (markdown, json_data)。"""
+    apply_policies()
     config = build_llm_config(settings)
     if kind == "threat_model":
         parsed, _resp = generate_threat_model(config, prompt)
@@ -348,3 +349,103 @@ def push_webhooks(project: str, threats: list[dict], webhooks: list[dict] | None
     if not outcomes:
         outcomes.append({"ok": False, "error": "未配置启用的 Webhook"})
     return outcomes
+
+
+# ---------------------------------------------------------------------------
+# STRIDE 覆盖度 / 报告差异对比 / 可选策略（基线注入与脱敏）
+# ---------------------------------------------------------------------------
+
+STRIDE_TYPES = [
+    "Spoofing",
+    "Tampering",
+    "Repudiation",
+    "Information Disclosure",
+    "Denial of Service",
+    "Elevation of Privilege",
+]
+
+
+def stride_coverage(threats: list[dict] | None) -> dict:
+    """统计 STRIDE 六类覆盖情况，返回计数与缺失类别。"""
+    counts = dict.fromkeys(STRIDE_TYPES, 0)
+    other = 0
+    for threat in threats or []:
+        raw = str(threat.get("Threat Type") or threat.get("threat_type") or "").strip()
+        matched = next((t for t in STRIDE_TYPES if t.lower() == raw.lower()), None)
+        if matched:
+            counts[matched] += 1
+        else:
+            other += 1
+    return {
+        "counts": counts,
+        "missing": [t for t in STRIDE_TYPES if counts[t] == 0],
+        "other": other,
+        "total": sum(counts.values()) + other,
+    }
+
+
+def _threat_fp(threat: dict) -> str:
+    ttype = str(threat.get("Threat Type") or threat.get("threat_type") or "").strip().lower()
+    scenario = str(threat.get("Scenario") or threat.get("scenario") or "").strip().lower()
+    return f"{ttype}|{scenario}"
+
+
+def diff_threats(old: list[dict] | None, new: list[dict] | None) -> dict:
+    """按（类型+场景）指纹对比两次威胁模型，返回新增/消失/未变。"""
+    old_map = {_threat_fp(t): t for t in (old or []) if _threat_fp(t) != "|"}
+    new_map = {_threat_fp(t): t for t in (new or []) if _threat_fp(t) != "|"}
+    added = [new_map[k] for k in new_map if k not in old_map]
+    removed = [old_map[k] for k in old_map if k not in new_map]
+    unchanged = [k for k in new_map if k in old_map]
+    return {
+        "added": added,
+        "removed": removed,
+        "added_count": len(added),
+        "removed_count": len(removed),
+        "unchanged_count": len(unchanged),
+    }
+
+
+def latest_threat_models(project: str, limit: int = 2) -> list[list[dict]]:
+    """取项目最近 N 次威胁模型的威胁列表（新→旧）。"""
+    reports = store.list_reports(project=project, kind="threat_model", limit=limit)
+    result = []
+    for row in reports:
+        try:
+            data = json.loads(row.get("content_json") or "{}")
+        except Exception:
+            data = {}
+        result.append(list(data.get("threat_model") or []))
+    return result
+
+
+def diff_latest_threat_models(project: str) -> dict | None:
+    """对比项目最近两次威胁模型；不足两次时返回 None。"""
+    models = latest_threat_models(project, limit=2)
+    if len(models) < 2:
+        return None
+    diff = diff_threats(models[1], models[0])
+    return {
+        "project": project,
+        "latest_count": len(models[0]),
+        "previous_count": len(models[1]),
+        **{k: diff[k] for k in ("added_count", "removed_count", "unchanged_count")},
+        "added": diff["added"],
+        "removed": diff["removed"],
+    }
+
+
+def apply_policies() -> dict:
+    """把服务端配置中的企业基线 / 脱敏策略应用到 LLM 调用层。"""
+    from stride_gpt.core.llm import set_extra_system_instruction, set_prompt_scrubber
+
+    saved = store.load_config()
+    baseline = (saved.get("security_baseline") or "").strip()
+    set_extra_system_instruction(baseline or None)
+    if saved.get("scrub_enabled", True):
+        from .scrub import scrub_text
+
+        set_prompt_scrubber(scrub_text)
+    else:
+        set_prompt_scrubber(None)
+    return {"baseline": bool(baseline), "scrubbing": bool(saved.get("scrub_enabled", True))}

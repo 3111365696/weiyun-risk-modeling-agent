@@ -43,16 +43,54 @@ GEMINI_SAFETY_SETTINGS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# 可选策略钩子（由上层应用设置；CLI 不设置时行为完全不变）
+# ---------------------------------------------------------------------------
+
+_EXTRA_SYSTEM_INSTRUCTION: str = ""
+_PROMPT_SCRUBBER = None  # Callable[[str], tuple[str, list[str]]] | None
+
+
+def set_extra_system_instruction(text: str | None) -> None:
+    """注入一段全局系统指令（如企业安全基线），所有调用生效。"""
+    global _EXTRA_SYSTEM_INSTRUCTION
+    _EXTRA_SYSTEM_INSTRUCTION = (text or "").strip()
+
+
+def set_prompt_scrubber(scrubber) -> None:
+    """设置发送前的文本脱敏函数（返回 (脱敏文本, 命中列表)）。None 表示关闭。"""
+    global _PROMPT_SCRUBBER
+    _PROMPT_SCRUBBER = scrubber
+
+
+def _apply_message_policies(messages: list[dict]) -> list[dict]:
+    """按需脱敏消息文本，并在最前插入额外系统指令。"""
+    out = messages
+    if _PROMPT_SCRUBBER is not None:
+        scrubbed = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, str):
+                cleaned, _hits = _PROMPT_SCRUBBER(content)
+                if cleaned != content:
+                    msg = {**msg, "content": cleaned}
+            scrubbed.append(msg)
+        out = scrubbed
+    if _EXTRA_SYSTEM_INSTRUCTION:
+        out = [{"role": "system", "content": _EXTRA_SYSTEM_INSTRUCTION}, *out]
+    return out
+
+
 def call_llm(config: LLMConfig, messages: list[dict]) -> LLMResponse:
     """Call an LLM with the given messages."""
-    return _call_litellm(config, messages)
+    return _call_litellm(config, _apply_message_policies(messages))
 
 
 def call_llm_with_tools(
     config: LLMConfig, messages: list[dict], tools: list[dict]
 ) -> LLMResponse:
     """Call an LLM with tool definitions. Returns response with optional tool_calls."""
-    return _call_litellm_with_tools(config, messages, tools)
+    return _call_litellm_with_tools(config, _apply_message_policies(messages), tools)
 
 
 def call_llm_with_image(

@@ -158,3 +158,31 @@ uv run streamlit run apps/web/main.py     # 默认 http://localhost:8501
 - `uv run pytest`：**835 passed**（新增 29 个公共层/API 相关测试：API Key 生命周期、配置加密、会话令牌、Webhook、归档去重、DREAD 回填、SARIF、提示词、流水线编排）
 - `uv run ruff check apps/ tests/`：全绿
 - API 端到端（模拟 LLM）：配置解析 → 威胁模型生成归档 → 全流程 6 步 → 报告列表 → SARIF → 台账更新 → Webhook 推送 → 401/400 错误路径；测试数据已清理
+
+## 增量记录（2026-10-16 夜）：P3 质量与企业化
+
+### 分析质量
+
+| 功能 | 说明 |
+|------|------|
+| STRIDE 覆盖度 | `generation.stride_coverage()`：六类计数与缺失类别；生成威胁模型后即时提示；项目概览与报告详情均有展示；API `/projects/{name}/coverage` |
+| 报告差异对比（drift） | `generation.diff_latest_threat_models()`：按（类型+场景）指纹对比最近两次威胁模型，输出新增/消失/未变；项目概览折叠卡片展示；API `/projects/{name}/diff` |
+| 敏感信息脱敏 | `common/scrub.py`：OpenAI/Anthropic/GitHub/AWS/Google/Slack/JWT/私钥/凭据赋值等模式，发送前替换为 `[已脱敏:...]`；默认开启，可在设置关闭 |
+| 企业安全基线 | 设置页可填写自定义要求（如等保/SSO/审计），保存后作为额外 system 指令注入**所有**模型调用 |
+
+核心支撑：`stride_gpt/core/llm.py` 新增两个可选策略钩子（`set_extra_system_instruction` / `set_prompt_scrubber`），CLI 不设置时行为完全不变。
+
+### 多用户与审计
+
+- **用户体系**：环境变量管理员（内置，不可删）+ 数据库用户（PBKDF2-HMAC-SHA256 加盐 20 万次迭代）；角色 `admin` / `user`
+- **权限门控**：非管理员看不到「系统配置」入口、无法访问设置页与「用户与审计」页；页面级二次校验
+- **用户管理页**（`/users`）：创建用户（用户名/初始密码/角色）、重置密码、删除、审计日志（按用户筛选）
+- **审计日志**：登录/登录失败/退出、保存/清除配置、创建/吊销 API Key、增删 Webhook、删除报告、更新台账、一键全流程、用户增删改
+- **会话安全修复**：登出时递增该用户的**会话纪元**（`session_epoch`），旧 cookie 立即失效——修复了"退出后被旧 cookie 立刻登回、清 cookie 代码永不执行"的真实 bug
+
+### 验证
+
+- `uv run pytest`：**850 passed**（新增 15 个 P3 测试：脱敏/覆盖度/差异/用户/审计/策略钩子）
+- `uv run ruff check apps/ tests/`：全绿
+- 浏览器实测：管理员建/看/删用户、普通用户登录后无配置入口且 `/users` 被拒、覆盖度与差异卡片、审计记录完整
+- API 实测：`/coverage`、`/diff`、404 错误路径；测试 Key 已吊销

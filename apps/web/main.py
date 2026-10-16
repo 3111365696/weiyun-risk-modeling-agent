@@ -964,6 +964,7 @@ if not st.session_state.get("_config_loaded"):
         if _cfg_val not in (None, ""):
             st.session_state[_cfg_key] = _cfg_val
     st.session_state["_config_loaded"] = True
+    _generation.apply_policies()  # 企业安全基线 + 脱敏策略
 
 # 配置默认值（可在「系统配置」界面修改）
 if "model_provider" not in st.session_state:
@@ -1187,12 +1188,34 @@ _AUTH_USERNAME = os.getenv("STRIDE_GPT_USERNAME", "admin")
 _AUTH_PASSWORD = os.getenv("STRIDE_GPT_PASSWORD", "admin123")
 
 
-def _check_credentials(username: str, password: str) -> bool:
-    return hmac.compare_digest(
+_ROLE_LABELS = {"admin": "系统管理员", "user": "普通用户"}
+
+
+def _role_display() -> str:
+    return _ROLE_LABELS.get(st.session_state.get("role", "user"), "普通用户")
+
+
+def _is_admin() -> bool:
+    return st.session_state.get("role") == "admin"
+
+
+def _authenticate(username: str, password: str) -> dict | None:
+    """校验凭据：环境变量管理员优先，其次数据库用户。返回 {username, role}。"""
+    if hmac.compare_digest(
         (username or "").encode("utf-8"), _AUTH_USERNAME.encode("utf-8")
     ) and hmac.compare_digest(
         (password or "").encode("utf-8"), _AUTH_PASSWORD.encode("utf-8")
-    )
+    ):
+        return {"username": username, "role": "admin"}
+    return store.verify_user(username or "", password or "")
+
+
+def _resolve_role(username: str) -> str | None:
+    """cookie 自动登录时解析角色；用户已被删除则返回 None。"""
+    if username == _AUTH_USERNAME:
+        return "admin"
+    user = store.get_user(username)
+    return user["role"] if user else None
 
 
 _LOGIN_CSS = """
@@ -1436,13 +1459,16 @@ def render_login() -> None:
                     "登 录", use_container_width=True, type="primary"
                 )
             if submitted:
-                if _check_credentials(username, password):
+                _account = _authenticate(username, password)
+                if _account:
                     st.session_state["authenticated"] = True
-                    st.session_state["user"] = username
-                    st.session_state["role"] = "系统管理员"
+                    st.session_state["user"] = _account["username"]
+                    st.session_state["role"] = _account["role"]
                     st.session_state["login_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    store.log_action(_account["username"], "登录", "密码登录")
                     st.rerun()
                 else:
+                    store.log_action(username or "未知用户", "登录失败", "用户名或密码错误")
                     st.error("用户名或密码错误，请重试")
             st.markdown(
                 '<div class="sg-card-foot">仅限授权人员访问 · 登录行为将被记录</div>',
@@ -1462,7 +1488,16 @@ def render_login() -> None:
 
 
 def _do_logout() -> None:
-    """清除登录态并回到登录页。"""
+    """清除登录态并回到登录页。
+
+    注意：必须先记录审计，再清会话；并设置 _skip_cookie_once，
+    否则下一轮会因为浏览器里尚未清除的 cookie 立刻自动登录回原账号，
+    导致清 cookie 的代码永远不会执行。
+    """
+    _logout_user = st.session_state.get("user", "")
+    store.log_action(_logout_user, "退出登录")
+    if _logout_user:
+        store.bump_session_epoch(_logout_user)  # 旧 cookie 立即失效
     for key in (
         "authenticated",
         "user",
@@ -1475,6 +1510,7 @@ def _do_logout() -> None:
     ):
         st.session_state.pop(key, None)
     st.session_state["_cookie_clear"] = True
+    st.session_state["_skip_cookie_once"] = True
     st.rerun()
 
 
@@ -1482,7 +1518,7 @@ def _do_logout() -> None:
 def _logout_dialog() -> None:
     """退出系统确认弹窗。"""
     _user = st.session_state.get("user", "")
-    _role = st.session_state.get("role", "系统管理员")
+    _role = _role_display()
     _at = st.session_state.get("login_at", "")
     st.markdown(f"当前用户：**{html.escape(_user)}** · {html.escape(_role)}")
     if _at:
@@ -1507,17 +1543,18 @@ def _cookie_js(token: str, *, clear: bool = False) -> str:
     return f'<script>try {{ window.parent.document.cookie = "{cookie}"; }} catch (e) {{}}</script>'
 
 
-# cookie 自动登录（7 天有效）
-if not st.session_state.get("authenticated"):
+# cookie 自动登录（7 天有效；刚退出登录时跳过一轮）
+if not st.session_state.get("authenticated") and not st.session_state.get("_skip_cookie_once"):
     try:
         _cookie_token = st.context.cookies.get(SESSION_COOKIE)
     except Exception:
         _cookie_token = None
     _cookie_user = verify_session_token(_cookie_token)
-    if _cookie_user:
+    _cookie_role = _resolve_role(_cookie_user) if _cookie_user else None
+    if _cookie_user and _cookie_role:
         st.session_state["authenticated"] = True
         st.session_state["user"] = _cookie_user
-        st.session_state["role"] = "系统管理员"
+        st.session_state["role"] = _cookie_role
         st.session_state["login_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
 if not st.session_state.get("authenticated"):
@@ -1531,6 +1568,7 @@ if not st.session_state.get("authenticated"):
     if st.session_state.pop("_cookie_clear", False):
         with st.container(key="cookie_clear"):
             st.iframe(_cookie_js("", clear=True), height=1)
+        st.session_state.pop("_skip_cookie_once", None)
     render_login()
     st.stop()
 
@@ -1595,7 +1633,7 @@ st.sidebar.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.sidebar.caption(f"当前用户：{st.session_state.get('user', '')} · {st.session_state.get('role', '系统管理员')}")
+st.sidebar.caption(f"当前用户：{st.session_state.get('user', '')} · {_role_display()}")
 if st.sidebar.button("退出登录", key="logout", use_container_width=True):
     st.session_state["confirm_logout"] = True
 
@@ -1609,7 +1647,9 @@ with st.sidebar:
         "3. 生成威胁模型、攻击树、数据流图、缓解措施等"
     )
     st.caption(f"当前模型：{st.session_state.get('selected_model', '-')}")
-    if st.button("打开系统配置", key="sidebar_settings", use_container_width=True):
+    if _is_admin() and st.button(
+        "打开系统配置", key="sidebar_settings", use_container_width=True
+    ):
         st.session_state["view"] = "settings"
         st.rerun()
     st.divider()
@@ -1727,7 +1767,10 @@ deepseek_api_key = st.session_state.get("deepseek_api_key", "")
 # ------------------ 系统配置 ------------------ #
 
 def render_settings() -> None:
-    """独立配置界面：模型服务、GitHub 集成、分析参数。"""
+    """独立配置界面：模型服务、GitHub 集成、分析参数（仅管理员）。"""
+    if not _is_admin():
+        st.error("需要管理员权限才能访问系统配置。")
+        return
     st.markdown(
         """
         <div class="sg-settings-head">
@@ -1876,11 +1919,14 @@ def render_settings() -> None:
             ):
                 _saved_at = save_config({k: st.session_state.get(k) for k in PERSIST_KEYS})
                 st.session_state["_config_saved_at"] = _saved_at
+                _generation.apply_policies()
+                store.log_action(st.session_state.get("user", ""), "保存配置")
                 st.success("配置已加密保存，重启服务后仍然生效。")
         with _clear_col:
             if st.button("清除已保存配置", key="clear_server_config", use_container_width=True):
                 clear_config()
                 st.session_state["_config_saved_at"] = None
+                store.log_action(st.session_state.get("user", ""), "清除配置")
                 st.warning("已清除服务端配置（当前会话中的值仍保留）。")
         _saved_at = st.session_state.get("_config_saved_at") or config_saved_at()
         st.caption(
@@ -1888,6 +1934,26 @@ def render_settings() -> None:
             if _saved_at
             else "当前会话中的修改即时生效；点击「保存配置到服务端」后重启仍生效。"
         )
+
+        with st.container(border=True, key="settings_policy"):
+            st.markdown("#### 安全策略")
+            st.caption("企业安全基线会注入所有生成请求；脱敏在发送前替换密钥/令牌等敏感串。")
+            st.text_area(
+                "企业安全基线 / 自定义要求",
+                key="security_baseline",
+                height=120,
+                placeholder=(
+                    "例如：\n- 必须符合等保 2.0 三级要求\n"
+                    "- 统一使用公司 SSO（OIDC）与集中审计\n- 数据出网需经网关审批"
+                ),
+                help="保存配置后生效，将作为额外的系统指令附加到每次模型调用。",
+            )
+            st.checkbox(
+                "发送前对密钥 / 令牌做脱敏",
+                key="scrub_enabled",
+                value=bool(st.session_state.get("scrub_enabled", True)),
+                help="识别 OpenAI/Anthropic/GitHub/AWS/JWT/私钥等模式并替换为 [已脱敏:...]。",
+            )
 
         with st.container(border=True, key="settings_api"):
             st.markdown("#### API 访问")
@@ -1900,6 +1966,9 @@ def render_settings() -> None:
                     st.warning("请先填写密钥名称")
                 else:
                     st.session_state["_new_api_key"] = store.create_api_key(_new_key_name.strip())
+                    store.log_action(
+                        st.session_state.get("user", ""), "创建 API Key", _new_key_name.strip()
+                    )
                     st.success("已创建，请立即复制保存（只显示一次）")
             if st.session_state.get("_new_api_key"):
                 st.code(st.session_state["_new_api_key"], language="text")
@@ -1916,6 +1985,7 @@ def render_settings() -> None:
                 with _kc2:
                     if st.button("吊销", key=f"revoke_key_{_k['id']}", use_container_width=True):
                         store.revoke_api_key(_k["id"])
+                        store.log_action(st.session_state.get("user", ""), "吊销 API Key", _k["name"])
                         st.rerun()
             if not _keys:
                 st.caption("暂无 API Key。")
@@ -1937,6 +2007,9 @@ def render_settings() -> None:
             if st.button("添加 Webhook", key="add_webhook"):
                 if _wh_name and _wh_url:
                     store.add_webhook(_wh_name, _wh_url, _wh_kind)
+                    store.log_action(
+                        st.session_state.get("user", ""), "添加 Webhook", _wh_name
+                    )
                     st.success("已添加")
                     st.rerun()
                 else:
@@ -1952,6 +2025,9 @@ def render_settings() -> None:
                 with _wc2:
                     if st.button("删除", key=f"del_webhook_{_w['id']}", use_container_width=True):
                         store.delete_webhook(_w["id"])
+                        store.log_action(
+                            st.session_state.get("user", ""), "删除 Webhook", _w["name"]
+                        )
                         st.rerun()
 
 
@@ -1979,19 +2055,20 @@ with _top_right:
               <span class="sg-avatar">{html.escape(_user_initial)}</span>
               <span>
                 <span class="sg-user-name">{html.escape(_user_name)}</span><br/>
-                <span class="sg-user-role">{st.session_state.get('role', '系统管理员')}</span>
+                <span class="sg-user-role">{_role_display()}</span>
               </span>
             </div>
             """,
             unsafe_allow_html=True,
         )
     with _cfg_col:
-        _cfg_label = "返回主页" if st.session_state.get("view") == "settings" else "系统配置"
-        if st.button(_cfg_label, key="settings_toggle", use_container_width=True):
-            st.session_state["view"] = (
-                "main" if st.session_state.get("view") == "settings" else "settings"
-            )
-            st.rerun()
+        if _is_admin():
+            _cfg_label = "返回主页" if st.session_state.get("view") == "settings" else "系统配置"
+            if st.button(_cfg_label, key="settings_toggle", use_container_width=True):
+                st.session_state["view"] = (
+                    "main" if st.session_state.get("view") == "settings" else "settings"
+                )
+                st.rerun()
     with _btn_col:
         if st.button("退出系统", key="logout_top", use_container_width=True):
             st.session_state["confirm_logout"] = True
@@ -1999,7 +2076,7 @@ with _top_right:
 if st.session_state.get("confirm_logout"):
     _logout_dialog()
 
-if st.session_state.get("view") == "settings":
+if st.session_state.get("view") == "settings" and _is_admin():
     render_settings()
     st.stop()
 
@@ -2389,6 +2466,11 @@ def _page_threat_model() -> None:
                             "improvement_suggestions": improvement_suggestions,
                         },
                     )
+                    _cov = _generation.stride_coverage(threat_model)
+                    if _cov["missing"]:
+                        st.warning("STRIDE 覆盖度：缺少 " + "、".join(_cov["missing"]) + " 类威胁")
+                    else:
+                        st.success("STRIDE 覆盖度：六类威胁均已覆盖")
                     break  # Exit the loop if successful
                 except Exception as e:
                     retry_count += 1
@@ -3198,6 +3280,20 @@ def _report_dialog(report: dict) -> None:
         f"{KIND_LABELS.get(report['kind'], report['kind'])} · {report['project'] or '未命名'}"
         f" · {report['created_at']} · {report['provider']}/{report['model']}"
     )
+    if report.get("kind") == "threat_model" and report.get("content_json"):
+        import json as _json
+
+        try:
+            _cov = _generation.stride_coverage(
+                _json.loads(report["content_json"]).get("threat_model") or []
+            )
+            st.caption(
+                "STRIDE 覆盖度："
+                + " · ".join(f"{k} {v}" for k, v in _cov["counts"].items() if v)
+                + (f" · 缺失：{'、'.join(_cov['missing'])}" if _cov["missing"] else " · 六类齐全")
+            )
+        except Exception:
+            pass
     st.markdown(report["content_md"])
     _d1, _d2, _d3, _d4, _d5 = st.columns(5)
     with _d1:
@@ -3330,6 +3426,9 @@ def _page_reports() -> None:
                 with _b4:
                     if st.button("删除", key=f"del_{_r['id']}", use_container_width=True):
                         delete_report(_r["id"])
+                        store.log_action(
+                            st.session_state.get("user", ""), "删除报告", f"#{_r['id']}"
+                        )
                         st.rerun()
 
     _view_id = st.session_state.get("_report_view_id")
@@ -3569,6 +3668,30 @@ def _page_projects() -> None:
     _tab_overview, _tab_register, _tab_board = st.tabs(["项目概览", "威胁台账", "风险看板"])
 
     with _tab_overview:
+        _latest_models = _generation.latest_threat_models(_sel, limit=1)
+        if _latest_models:
+            _cov = _generation.stride_coverage(_latest_models[0])
+            st.caption(
+                "STRIDE 覆盖度："
+                + " · ".join(f"{k} {v}" for k, v in _cov["counts"].items() if v)
+                + (f" · 缺失：{'、'.join(_cov['missing'])}" if _cov["missing"] else " · 六类齐全")
+            )
+        _diff = _generation.diff_latest_threat_models(_sel)
+        if _diff:
+            with st.expander(
+                f"变更对比（最近两次威胁模型）：新增 {_diff['added_count']} ·"
+                f" 消失 {_diff['removed_count']} · 未变 {_diff['unchanged_count']}"
+            ):
+                if _diff["added"]:
+                    st.markdown("**新增威胁**")
+                    for _t in _diff["added"]:
+                        st.markdown(f"- {_t.get('Threat Type', '')} · {_t.get('Scenario', '')}")
+                if _diff["removed"]:
+                    st.markdown("**已消失威胁**")
+                    for _t in _diff["removed"]:
+                        st.markdown(f"- {_t.get('Threat Type', '')} · {_t.get('Scenario', '')}")
+                if not _diff["added"] and not _diff["removed"]:
+                    st.caption("两次威胁模型完全一致。")
         _desc = st.text_area(
             "应用描述（用于分析与生成）",
             value=_proj.get("description") or "",
@@ -3587,6 +3710,7 @@ def _page_projects() -> None:
             st.caption("保存后，「威胁模型」页与一键全流程都会使用这段描述。")
         if st.button("一键全流程生成", type="primary", key="ws_pipeline"):
             _desc_effective = (_desc or _proj.get("description") or st.session_state.get("app_input") or "").strip()
+            store.log_action(st.session_state.get("user", ""), "一键全流程生成", _sel)
             _run_full_pipeline(_sel, _desc_effective)
         st.markdown("#### 产物")
         _reports = list_reports(project=_sel, limit=100)
@@ -3680,6 +3804,9 @@ def _page_projects() -> None:
                         for t in _rows
                     ]
                     _n = update_threats(_edits)
+                    store.log_action(
+                        st.session_state.get("user", ""), "更新威胁台账", f"{_sel}（{_n} 条）"
+                    )
                     st.success(f"已保存 {_n} 条变更。")
                     st.rerun()
             with _reg_c2:
@@ -3732,6 +3859,98 @@ def _page_projects() -> None:
             st.caption("生成一次 DREAD 风险评估后，风险分会自动回填到台账。")
 
 
+def _page_users() -> None:
+    """用户与审计：账号管理（仅管理员）+ 操作审计日志。"""
+    if not _is_admin():
+        st.warning("该页面仅管理员可用。")
+        return
+
+    st.markdown("#### 用户管理")
+    with st.container(border=True, key="users_manage"):
+        _u1, _u2, _u3 = st.columns([2, 2, 1.4])
+        with _u1:
+            _new_user = st.text_input("用户名", key="nu_name", placeholder="如：zhangsan")
+        with _u2:
+            _new_pw = st.text_input(
+                "初始密码", type="password", key="nu_pw", placeholder="至少 6 位"
+            )
+        with _u3:
+            _new_role = st.selectbox(
+                "角色",
+                ["user", "admin"],
+                key="nu_role",
+                format_func=lambda r: _ROLE_LABELS.get(r, r),
+            )
+        if st.button("创建用户", key="create_user", use_container_width=True):
+            try:
+                store.create_user(_new_user, _new_pw, _new_role)
+                store.log_action(
+                    st.session_state.get("user", ""),
+                    "创建用户",
+                    f"{_new_user}（{_new_role}）",
+                )
+                st.success(f"已创建用户 {_new_user}")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+        st.markdown(
+            f"**{_AUTH_USERNAME}**（内置管理员）  \n"
+            "<span class='sg-rep-meta'>由环境变量 STRIDE_GPT_USERNAME/PASSWORD 管理，不可在此修改</span>",
+            unsafe_allow_html=True,
+        )
+        for _u in store.list_users():
+            _uc1, _uc2, _uc3 = st.columns([4, 1.4, 1], vertical_alignment="center")
+            with _uc1:
+                st.markdown(
+                    f"**{_u['username']}**（{_ROLE_LABELS.get(_u['role'], _u['role'])}）  \n"
+                    f"<span class='sg-rep-meta'>创建 {_u['created_at']} ·"
+                    f" 最近登录 {_u['last_login'] or '—'}</span>",
+                    unsafe_allow_html=True,
+                )
+            with _uc2, st.popover("重置密码", use_container_width=True):
+                _rp = st.text_input(
+                    "新密码", type="password", key=f"rp_{_u['username']}"
+                )
+                if st.button("确认重置", key=f"rp_btn_{_u['username']}"):
+                    try:
+                        store.set_user_password(_u["username"], _rp)
+                        store.log_action(
+                            st.session_state.get("user", ""),
+                            "重置密码",
+                            _u["username"],
+                        )
+                        st.success("已重置")
+                    except ValueError as exc:
+                        st.error(str(exc))
+            with _uc3:
+                if st.button(
+                    "删除", key=f"del_user_{_u['username']}", use_container_width=True
+                ):
+                    store.delete_user(_u["username"])
+                    store.log_action(
+                        st.session_state.get("user", ""), "删除用户", _u["username"]
+                    )
+                    st.rerun()
+
+    st.markdown("#### 审计日志")
+    _audit_filter = st.text_input("按用户筛选", key="audit_filter", placeholder="留空显示全部")
+    _logs = store.list_audit(limit=200, username=(_audit_filter or "").strip() or None)
+    if not _logs:
+        st.caption("暂无审计记录。")
+        return
+    _lines = [
+        "| 时间 | 用户 | 操作 | 详情 |",
+        "|---|---|---|---|",
+    ]
+    for _row in _logs:
+        _detail = (_row["detail"] or "").replace("|", "\\|").replace("\n", " ")[:80]
+        _lines.append(
+            f"| {_row['ts']} | {_row['username']} | {_row['action']} | {_detail} |"
+        )
+    st.markdown("\n".join(_lines))
+
+
 # ------------------ 页面路由（独立 URL） ------------------ #
 
 _PAGE_HEADERS = {
@@ -3743,6 +3962,7 @@ _PAGE_HEADERS = {
     "DREAD 风险评估": ("DREAD", "DREAD 风险评估"),
     "测试用例": ("TEST CASES", "测试用例"),
     "报告历史": ("REPORTS", "报告历史"),
+    "用户与审计": ("USERS & AUDIT", "用户与审计"),
 }
 
 # 六个页面注册为独立路由：每页有自己的地址（可刷新 / 收藏 / 分享）
@@ -3755,6 +3975,7 @@ _PAGE_PAGES = {
     "DREAD 风险评估": st.Page(_page_dread, title="DREAD 风险评估", url_path="dread"),
     "测试用例": st.Page(_page_test_cases, title="测试用例", url_path="test-cases"),
     "报告历史": st.Page(_page_reports, title="报告历史", url_path="reports"),
+    "用户与审计": st.Page(_page_users, title="用户与审计", url_path="users"),
 }
 
 _pg = st.navigation(list(_PAGE_PAGES.values()), position="hidden")
@@ -3769,6 +3990,7 @@ _PATH_TO_TITLE = {
     "dread": "DREAD 风险评估",
     "test-cases": "测试用例",
     "reports": "报告历史",
+    "users": "用户与审计",
 }
 _pending_path = st.session_state.pop("_pending_path", None)
 if _pending_path:

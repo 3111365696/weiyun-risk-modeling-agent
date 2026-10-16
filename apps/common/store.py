@@ -44,6 +44,8 @@ PERSIST_KEYS = [
     "use_thinking",
     "lm_studio_endpoint",
     "project_name",
+    "security_baseline",
+    "scrub_enabled",
     *sorted(SENSITIVE_KEYS),
 ]
 
@@ -206,6 +208,37 @@ def init_db() -> None:
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT '',
                 last_used_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                created_at TEXT NOT NULL DEFAULT '',
+                last_login TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL DEFAULT '',
+                username TEXT NOT NULL DEFAULT '',
+                action TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT ''
             )
             """
         )
@@ -698,9 +731,37 @@ def _session_secret() -> bytes:
     return secret
 
 
+def get_meta(key: str, default: str = "") -> str:
+    init_db()
+    with _conn() as c:
+        row = c.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return str(row["value"]) if row else default
+
+
+def set_meta(key: str, value: str) -> None:
+    init_db()
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
+def session_epoch(username: str) -> str:
+    """会话纪元：登出时递增，使该用户此前签发的所有 cookie 立即失效。"""
+    return get_meta(f"session_epoch:{username}", "0")
+
+
+def bump_session_epoch(username: str) -> str:
+    epoch = str(int(session_epoch(username) or "0") + 1)
+    set_meta(f"session_epoch:{username}", epoch)
+    return epoch
+
+
 def make_session_token(username: str, days: int = 7) -> str:
     payload = json.dumps(
-        {"u": username, "exp": int(time.time()) + days * 86400},
+        {"u": username, "exp": int(time.time()) + days * 86400, "e": session_epoch(username)},
         separators=(",", ":"),
     ).encode("utf-8")
     sig = hmac.new(_session_secret(), payload, hashlib.sha256).hexdigest()
@@ -720,7 +781,13 @@ def verify_session_token(token: str | None) -> str | None:
         data = json.loads(payload)
         if int(data.get("exp", 0)) < int(time.time()):
             return None
-        return str(data.get("u") or "") or None
+        username = str(data.get("u") or "")
+        if not username:
+            return None
+        # 会话纪元不匹配 = 用户已登出（或凭据已变更）
+        if str(data.get("e", "0")) != session_epoch(username):
+            return None
+        return username
     except Exception:
         return None
 
@@ -867,3 +934,115 @@ def threat_webhook_payload(kind: str, project: str, threats: list[dict]) -> dict
             for t in threats
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# 用户与审计
+# ---------------------------------------------------------------------------
+
+ROLES = ["admin", "user"]
+_PBKDF2_ITERATIONS = 200_000
+
+
+def _hash_password(password: str, salt_hex: str | None = None) -> tuple[str, str]:
+    salt = bytes.fromhex(salt_hex) if salt_hex else os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+    return digest.hex(), salt.hex()
+
+
+def create_user(username: str, password: str, role: str = "user") -> None:
+    """创建用户；用户名已存在抛 ValueError。"""
+    username = (username or "").strip()
+    if not username:
+        raise ValueError("用户名不能为空")
+    if len(password or "") < 6:
+        raise ValueError("密码至少 6 位")
+    if role not in ROLES:
+        raise ValueError(f"角色必须是 {ROLES}")
+    init_db()
+    pw_hash, salt = _hash_password(password)
+    with _conn() as c:
+        exists = c.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone()
+        if exists:
+            raise ValueError(f"用户「{username}」已存在")
+        c.execute(
+            "INSERT INTO users(username, password_hash, salt, role, created_at, last_login)"
+            " VALUES(?, ?, ?, ?, ?, '')",
+            (username, pw_hash, salt, role, _now()),
+        )
+
+
+def verify_user(username: str, password: str) -> dict | None:
+    """校验用户名密码；成功返回 {username, role} 并刷新 last_login。"""
+    if not username or not password:
+        return None
+    init_db()
+    with _conn() as c:
+        row = c.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        if not row:
+            return None
+        digest, _salt = _hash_password(password, row["salt"])
+        if not hmac.compare_digest(digest, row["password_hash"]):
+            return None
+        c.execute("UPDATE users SET last_login = ? WHERE username = ?", (_now(), username))
+    return {"username": username, "role": str(row["role"])}
+
+
+def get_user(username: str) -> dict | None:
+    init_db()
+    with _conn() as c:
+        row = c.execute(
+            "SELECT username, role, created_at, last_login FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_users() -> list[dict]:
+    init_db()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT username, role, created_at, last_login FROM users ORDER BY username"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_user(username: str) -> None:
+    init_db()
+    with _conn() as c:
+        c.execute("DELETE FROM users WHERE username = ?", (username,))
+
+
+def set_user_password(username: str, password: str) -> None:
+    if len(password or "") < 6:
+        raise ValueError("密码至少 6 位")
+    pw_hash, salt = _hash_password(password)
+    init_db()
+    with _conn() as c:
+        c.execute(
+            "UPDATE users SET password_hash = ?, salt = ? WHERE username = ?",
+            (pw_hash, salt, username),
+        )
+
+
+def log_action(username: str, action: str, detail: str = "") -> None:
+    """写入审计日志（失败静默，不影响业务）。"""
+    try:
+        init_db()
+        with _conn() as c:
+            c.execute(
+                "INSERT INTO audit_log(ts, username, action, detail) VALUES(?, ?, ?, ?)",
+                (_now(), username or "匿名", action, detail or ""),
+            )
+    except Exception:
+        pass
+
+
+def list_audit(limit: int = 200, username: str | None = None) -> list[dict]:
+    init_db()
+    with _conn() as c:
+        rows = c.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    result = [dict(r) for r in rows]
+    if username:
+        result = [r for r in result if r["username"] == username]
+    return result

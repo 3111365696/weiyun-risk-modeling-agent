@@ -140,7 +140,7 @@ def _generate_one(kind: str, req: GenerateRequest, api_key_name: str) -> dict:
             provider=settings.get("provider", ""),
             model=settings.get("model", ""),
         )
-    return {
+    response = {
         "ok": True,
         "kind": kind,
         "project": project,
@@ -151,6 +151,9 @@ def _generate_one(kind: str, req: GenerateRequest, api_key_name: str) -> dict:
         "markdown": content_md,
         "json": content_json,
     }
+    if kind == "threat_model" and isinstance(content_json, dict):
+        response["coverage"] = generation.stride_coverage(content_json.get("threat_model"))
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +299,22 @@ def api_project_threats(
 ) -> dict:
     rows = store.list_threats(project=name, status=status, search=search)
     return {"ok": True, "count": len(rows), "threats": rows}
+
+
+@app.get("/api/v1/projects/{name}/coverage", summary="STRIDE 覆盖度（最近一次威胁模型）")
+def api_project_coverage(name: str, api_key_name: str = Depends(require_api_key)) -> dict:
+    models = generation.latest_threat_models(name, limit=1)
+    if not models:
+        raise HTTPException(status_code=404, detail=f"项目「{name}」还没有威胁模型报告")
+    return {"ok": True, "project": name, "coverage": generation.stride_coverage(models[0])}
+
+
+@app.get("/api/v1/projects/{name}/diff", summary="最近两次威胁模型差异（drift）")
+def api_project_diff(name: str, api_key_name: str = Depends(require_api_key)) -> dict:
+    diff = generation.diff_latest_threat_models(name)
+    if diff is None:
+        raise HTTPException(status_code=400, detail="至少需要两次威胁模型报告才能对比")
+    return {"ok": True, **diff}
 
 
 @app.patch("/api/v1/threats/{threat_id}", summary="更新威胁台账条目")
