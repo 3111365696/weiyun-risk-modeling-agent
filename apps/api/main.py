@@ -24,11 +24,15 @@ for _p in (_REPO_ROOT, _APPS_DIR):
         sys.path.insert(0, str(_p))
 
 from common import agentic, generation, store, usage  # noqa: E402
+from common import logging_setup as _logging  # noqa: E402
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 VERSION = "0.20.0"
+
+_logging.setup("api")
+_log = _logging.get_logger("api")
 
 app = FastAPI(
     title="威云-风险建模智能体 API",
@@ -38,6 +42,54 @@ app = FastAPI(
         "DREAD 风险评估与测试用例。请求头需携带 X-API-Key。"
     ),
 )
+@app.middleware("http")
+async def _request_context(request, call_next):
+    """每个请求一个追踪编号：响应头 X-Request-ID + 访问日志。"""
+    import time
+
+    trace = request.headers.get("X-Request-ID") or _logging.new_trace("api")
+    _logging.set_context(source="api", trace=trace, method=request.method, path=request.url.path)
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        _log.exception("请求处理异常", extra={"path": request.url.path})
+        raise
+    elapsed = (time.perf_counter() - started) * 1000
+    level = _log.warning if response.status_code >= 400 else _log.info
+    level(
+        "请求完成",
+        extra={
+            "status": response.status_code,
+            "ms": round(elapsed, 1),
+            "client": request.client.host if request.client else "",
+        },
+    )
+    response.headers["X-Request-ID"] = trace
+    return response
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception(request, exc: Exception):
+    """未捕获异常：返回错误编号，堆栈只进日志。"""
+    from fastapi.responses import JSONResponse
+
+    error_id = "ERR-" + uuid.uuid4().hex[:6].upper()
+    _log.error(
+        "未处理异常",
+        exc_info=exc,
+        extra={"path": request.url.path, "error_id": error_id, "method": request.method},
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "internal_error",
+            "error_id": error_id,
+            "detail": f"服务器内部错误（错误编号 {error_id}）",
+        },
+    )
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

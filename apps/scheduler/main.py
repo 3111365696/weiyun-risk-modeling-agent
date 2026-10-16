@@ -20,25 +20,38 @@ for _p in (_REPO_ROOT, _APPS_DIR):
         sys.path.insert(0, str(_p))
 
 from common import generation, store  # noqa: E402
+from common import logging_setup as _logging  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("scheduler")
+_logging.setup("scheduler", console=True)
+log = _logging.get_logger("scheduler")
 
 
 def run_due() -> int:
     """执行所有到期计划，返回到期数量。"""
     due = store.due_schedules()
     for schedule in due:
-        log.info("执行计划：%s（间隔 %s 分钟）", schedule["project"], schedule["interval_minutes"])
-        result = generation.run_scheduled_analysis(schedule)
-        log.info(
-            "计划完成：%s -> %s（新增 %s / 消失 %s，推送 %s）",
-            schedule["project"],
-            result.get("status"),
-            result.get("added"),
-            result.get("removed"),
-            result.get("pushed"),
-        )
+        trace = _logging.new_trace("sched")
+        with _logging.bound(trace=trace, project=schedule["project"], schedule_id=schedule.get("id")):
+            log.info(
+                "执行计划",
+                extra={"interval_minutes": schedule["interval_minutes"], "trace": trace},
+            )
+            try:
+                result = generation.run_scheduled_analysis(schedule)
+            except Exception:
+                log.exception("计划执行失败", extra={"project": schedule["project"]})
+                store.log_action("scheduler", "定时分析失败", schedule["project"])
+                continue
+            log.info(
+                "计划完成",
+                extra={
+                    "status": result.get("status"),
+                    "added": result.get("added"),
+                    "removed": result.get("removed"),
+                    "pushed": result.get("pushed"),
+                },
+            )
     return len(due)
 
 
@@ -53,7 +66,7 @@ def main() -> None:
         log.info("本次到期计划：%s 条", count)
         return
 
-    log.info("调度器启动（每 %s 秒检查一次到期计划）", args.interval)
+    log.info("调度器启动", extra={"interval_seconds": args.interval})
     while True:
         try:
             run_due()

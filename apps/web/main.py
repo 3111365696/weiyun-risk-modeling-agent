@@ -47,10 +47,12 @@ from common import exporters as _exporters
 from common import generation as _generation
 from common import i18n as _i18n
 from common import interop as _interop
+from common import logging_setup as _logging
 from common import scanners as _scanners
 from common import standards as _standards
 from common import store
 from common import usage as _usage
+from error_boundary import guard, guard_block
 
 _t = _i18n.t
 from common.store import (
@@ -986,6 +988,10 @@ load_env_variables()
 from stride_gpt.models import PROVIDERS as _PROVIDERS
 from stride_gpt.models import get_model, get_models_for_provider, model_supports_thinking
 
+# 结构化日志：每个页面重跑重置追踪编号（写入 ~/.stride-gpt/logs/web.jsonl）
+_logging.setup("web")
+_logging.set_context(source="web", trace=_logging.new_trace("web"))
+
 # 载入服务端保存的配置（每个会话只加载一次，避免覆盖会话内的修改）
 if not st.session_state.get("_config_loaded"):
     for _cfg_key, _cfg_val in load_config().items():
@@ -1596,6 +1602,9 @@ if not st.session_state.get("authenticated"):
     render_login()
     st.stop()
 
+# 日志上下文：绑定当前用户
+_logging.bind(user=st.session_state.get("user", ""))
+
 # 首次通过登录后写入会话 cookie（浏览器刷新免登录）
 if not st.session_state.get("_cookie_synced"):
     with st.container(key="cookie_sync"):
@@ -2182,7 +2191,8 @@ if st.session_state.get("confirm_logout"):
     _logout_dialog()
 
 if st.session_state.get("view") == "settings" and _is_admin():
-    render_settings()
+    with guard_block("settings"):
+        render_settings()
     st.stop()
 
 # （页面导航控件在文件末尾随路由一起注册）
@@ -4691,17 +4701,17 @@ _PAGE_HEADERS = {
 
 # 六个页面注册为独立路由：每页有自己的地址（可刷新 / 收藏 / 分享）
 _PAGE_PAGES = {
-    _t("概览", "Overview"): st.Page(_page_overview, title=_t("概览", "Overview"), url_path="overview", default=True),
-    _t("威胁模型", "Threat Model"): st.Page(_page_threat_model, title=_t("威胁模型", "Threat Model"), url_path="threat-model"),
-    _t("代码审计", "Code Audit"): st.Page(_page_code_audit, title=_t("代码审计", "Code Audit"), url_path="code-audit"),
-    _t("项目工作区", "Projects"): st.Page(_page_projects, title=_t("项目工作区", "Projects"), url_path="projects"),
-    _t("攻击树", "Attack Tree"): st.Page(_page_attack_tree, title=_t("攻击树", "Attack Tree"), url_path="attack-tree"),
-    _t("数据流图", "Data Flow Diagram"): st.Page(_page_data_flow, title=_t("数据流图", "Data Flow Diagram"), url_path="data-flow-diagram"),
-    _t("缓解措施", "Mitigations"): st.Page(_page_mitigations, title=_t("缓解措施", "Mitigations"), url_path="mitigations"),
-    _t("DREAD 风险评估", "DREAD Assessment"): st.Page(_page_dread, title=_t("DREAD 风险评估", "DREAD Assessment"), url_path="dread"),
-    _t("测试用例", "Test Cases"): st.Page(_page_test_cases, title=_t("测试用例", "Test Cases"), url_path="test-cases"),
-    _t("报告历史", "Report History"): st.Page(_page_reports, title=_t("报告历史", "Report History"), url_path="reports"),
-    _t("用户与审计", "Users & Audit"): st.Page(_page_users, title=_t("用户与审计", "Users & Audit"), url_path="users"),
+    _t("概览", "Overview"): st.Page(guard("overview")(_page_overview), title=_t("概览", "Overview"), url_path="overview", default=True),
+    _t("威胁模型", "Threat Model"): st.Page(guard("threat-model")(_page_threat_model), title=_t("威胁模型", "Threat Model"), url_path="threat-model"),
+    _t("代码审计", "Code Audit"): st.Page(guard("code-audit")(_page_code_audit), title=_t("代码审计", "Code Audit"), url_path="code-audit"),
+    _t("项目工作区", "Projects"): st.Page(guard("projects")(_page_projects), title=_t("项目工作区", "Projects"), url_path="projects"),
+    _t("攻击树", "Attack Tree"): st.Page(guard("attack-tree")(_page_attack_tree), title=_t("攻击树", "Attack Tree"), url_path="attack-tree"),
+    _t("数据流图", "Data Flow Diagram"): st.Page(guard("data-flow-diagram")(_page_data_flow), title=_t("数据流图", "Data Flow Diagram"), url_path="data-flow-diagram"),
+    _t("缓解措施", "Mitigations"): st.Page(guard("mitigations")(_page_mitigations), title=_t("缓解措施", "Mitigations"), url_path="mitigations"),
+    _t("DREAD 风险评估", "DREAD Assessment"): st.Page(guard("dread")(_page_dread), title=_t("DREAD 风险评估", "DREAD Assessment"), url_path="dread"),
+    _t("测试用例", "Test Cases"): st.Page(guard("test-cases")(_page_test_cases), title=_t("测试用例", "Test Cases"), url_path="test-cases"),
+    _t("报告历史", "Report History"): st.Page(guard("reports")(_page_reports), title=_t("报告历史", "Report History"), url_path="reports"),
+    _t("用户与审计", "Users & Audit"): st.Page(guard("users")(_page_users), title=_t("用户与审计", "Users & Audit"), url_path="users"),
 }
 
 _pg = st.navigation(list(_PAGE_PAGES.values()), position="hidden")
