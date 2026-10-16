@@ -116,3 +116,45 @@ uv run streamlit run apps/web/main.py     # 默认 http://localhost:8501
 - 用本地 OpenAI 兼容模拟服务（`/tmp/mock_llm.py`，非仓库文件）端到端验证：6 步全流程 6 次 LLM 调用、6 份报告归档、4 条新威胁入库去重、DREAD 分数自动回填
 - 浏览器实测：cookie 免登录刷新、台账渲染、看板图表、配置持久化重启恢复
 - 测试痕迹（mock 报告/威胁/配置）已全部清理
+
+## 增量记录（2026-10-16 晚）：P2 平台化（REST API + CI + 集成）
+
+### 公共层重构（apps/common）
+
+| 模块 | 内容 |
+|------|------|
+| `apps/common/store.py` | 由 `apps/web/store.py` 迁移；新增 api_keys / webhooks 表；API Key 哈希校验与吊销、Webhook CRUD 与多平台推送体构造 |
+| `apps/common/text.py` | 从 apps/web 抽取的纯函数：6 类提示词构造 + 威胁模型/DREAD 的 Markdown 渲染（Web 与 API 共用，无 Streamlit 依赖） |
+| `apps/common/generation.py` | 无 Streamlit 的生成编排：模型配置解析（参数 > 保存配置 > 环境变量）、六类生成、归档（报告/项目/台账/DREAD 回填）、全流程、SARIF 生成、Webhook 推送 |
+
+### REST API（apps/api，FastAPI）
+
+- 启动：`uv run python -m uvicorn apps.api.main:app --host 0.0.0.0 --port 8000`（或 `./scripts/run_api.sh`）
+- 鉴权：`X-API-Key`（Web「系统配置 → API 访问」创建，仅显示一次，可吊销）
+- 端点：健康检查、配置状态、6 类生成、一键全流程、报告 CRUD、SARIF 导出、项目/台账查询与更新、Webhook 管理/推送（Swagger：`/docs`）
+- 依赖：fastapi / uvicorn（pyproject `api` 组，已加入 default-groups）
+
+### 集成能力
+
+- **CI**：`GET /api/v1/reports/{id}/sarif` 产出 SARIF 2.1.0；`docs/api.md` 含 GitHub Actions 完整示例（生成 → 导出 → Code Scanning 上传）
+- **工单/通知**：Webhook 支持飞书 / 企业微信 / 钉钉 / 通用 JSON，可在项目台账一键推送
+- **部署**：docker-compose 新增 `stridegpt-api` 服务（复用 UI 镜像，暴露 8000）
+
+### Web 界面
+
+- 系统配置新增「API 访问」（创建/列表/吊销，密钥一次性展示）与「工单 / 通知集成」（Webhook 增删）
+- 威胁台账新增「推送到 Webhook」按钮
+- 报告详情弹窗对威胁模型提供「下载 SARIF」
+
+### 修复
+
+1. `json_to_markdown` 对模型漏字段（缺 Potential Impact 等）会 KeyError → 改为 `.get` 兜底
+2. `generation` 按 provider_key 查找 ProviderInfo（`PROVIDERS` 是以显示名为键，原实现拿不到 needs_api_key）
+3. 抽离函数后 Web 模块的 re-export 被 ruff 当作未使用删除 → 显式 `# noqa: F401` re-export 并复测
+4. 中文本地化触发 RUF001-003 → pyproject 显式忽略（有注释说明）
+
+### 验证
+
+- `uv run pytest`：**835 passed**（新增 29 个公共层/API 相关测试：API Key 生命周期、配置加密、会话令牌、Webhook、归档去重、DREAD 回填、SARIF、提示词、流水线编排）
+- `uv run ruff check apps/ tests/`：全绿
+- API 端到端（模拟 LLM）：配置解析 → 威胁模型生成归档 → 全流程 6 步 → 报告列表 → SARIF → 台账更新 → Webhook 推送 → 401/400 错误路径；测试数据已清理

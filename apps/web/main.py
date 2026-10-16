@@ -11,9 +11,12 @@ _os.environ.setdefault("ARROW_DEFAULT_MEMORY_POOL", "system")
 import sys
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+_APP_DIR = Path(__file__).resolve().parent
+_APPS_DIR = _APP_DIR.parent
+_REPO_ROOT = _APPS_DIR.parent
+for _p in (_REPO_ROOT, _APPS_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 import base64
 import hashlib
@@ -21,9 +24,9 @@ import hmac
 import html
 import json
 import os
-from datetime import datetime
 import re
 from collections import defaultdict
+from datetime import datetime
 from urllib.parse import urlparse
 
 import requests
@@ -38,6 +41,35 @@ from attack_tree import (
     get_attack_tree_groq,
     get_attack_tree_lm_studio,
     get_attack_tree_mistral,
+)
+from common import generation as _generation
+from common import store
+from common.store import (
+    KIND_LABELS,
+    PERSIST_KEYS,
+    SESSION_COOKIE,
+    THREAT_STATUSES,
+    backfill_project,
+    clear_config,
+    config_saved_at,
+    delete_report,
+    export_zip,
+    get_report,
+    list_projects,
+    list_reports,
+    list_threats,
+    load_config,
+    load_draft,
+    make_session_token,
+    report_count,
+    report_to_html,
+    save_config,
+    save_draft,
+    sync_projects_from_reports,
+    threat_stats,
+    update_project_description,
+    update_threats,
+    verify_session_token,
 )
 from components.drawio_editor import drawio_editor_component
 from dfd import (
@@ -101,39 +133,6 @@ from threat_model import (
     get_threat_model_lm_studio,
     get_threat_model_mistral,
     json_to_markdown,
-)
-
-from store import (
-    KIND_LABELS,
-    PERSIST_KEYS,
-    SESSION_COOKIE,
-    THREAT_STATUSES,
-    add_threats,
-    apply_dread_scores,
-    backfill_project,
-    clear_config,
-    config_saved_at,
-    delete_report,
-    export_zip,
-    get_project,
-    get_report,
-    list_projects,
-    list_reports,
-    list_threats,
-    load_config,
-    load_draft,
-    make_session_token,
-    report_count,
-    report_to_html,
-    save_config,
-    save_draft,
-    save_report,
-    sync_projects_from_reports,
-    threat_stats,
-    update_project_description,
-    update_threats,
-    upsert_project,
-    verify_session_token,
 )
 
 from stride_gpt.core.drawio_parser import drawio_to_prompt_section
@@ -1419,8 +1418,7 @@ def render_login() -> None:
             """,
             unsafe_allow_html=True,
         )
-    with right:
-        with st.container(border=True, key="login_card"):
+    with right, st.container(border=True, key="login_card"):
             st.markdown(
                 """
                 <div class="sg-kicker">ACCESS CONTROL</div>
@@ -1743,8 +1741,7 @@ def render_settings() -> None:
 
     _cfg_left, _cfg_right = st.columns([1.15, 1], gap="large")
 
-    with _cfg_left:
-        with st.container(border=True, key="settings_model"):
+    with _cfg_left, st.container(border=True, key="settings_model"):
             st.markdown("#### 模型服务")
             st.caption("配置大模型提供商、API Key 与默认模型。API Key 仅保存在当前浏览器会话中。")
 
@@ -1891,6 +1888,71 @@ def render_settings() -> None:
             if _saved_at
             else "当前会话中的修改即时生效；点击「保存配置到服务端」后重启仍生效。"
         )
+
+        with st.container(border=True, key="settings_api"):
+            st.markdown("#### API 访问")
+            st.caption("供 REST API（apps/api）与 CI 调用；密钥仅在创建时显示一次。")
+            _new_key_name = st.text_input(
+                "新密钥名称", key="api_key_name", placeholder="如：CI 流水线"
+            )
+            if st.button("创建 API Key", key="create_api_key", use_container_width=True):
+                if not (_new_key_name or "").strip():
+                    st.warning("请先填写密钥名称")
+                else:
+                    st.session_state["_new_api_key"] = store.create_api_key(_new_key_name.strip())
+                    st.success("已创建，请立即复制保存（只显示一次）")
+            if st.session_state.get("_new_api_key"):
+                st.code(st.session_state["_new_api_key"], language="text")
+                st.caption("刷新页面后不再显示。")
+            _keys = store.list_api_keys()
+            for _k in _keys:
+                _kc1, _kc2 = st.columns([4, 1], vertical_alignment="center")
+                with _kc1:
+                    st.markdown(
+                        f"**{_k['name']}**  \n<span class='sg-rep-meta'>创建 {_k['created_at']}"
+                        f" · 最近使用 {_k['last_used_at'] or '—'}</span>",
+                        unsafe_allow_html=True,
+                    )
+                with _kc2:
+                    if st.button("吊销", key=f"revoke_key_{_k['id']}", use_container_width=True):
+                        store.revoke_api_key(_k["id"])
+                        st.rerun()
+            if not _keys:
+                st.caption("暂无 API Key。")
+            st.caption("接口地址示例：`http://<服务器>:8000/api/v1/threat-model`（启动与示例见 docs/api.md）")
+
+        with st.container(border=True, key="settings_webhooks"):
+            st.markdown("#### 工单 / 通知集成")
+            st.caption(
+                "威胁台账可推送到飞书 / 企业微信 / 钉钉 / 通用 Webhook"
+                "（Jira、禅道等可经通用 Webhook 中转）。"
+            )
+            _wh1, _wh2, _wh3 = st.columns([2, 3, 1.4])
+            with _wh1:
+                _wh_name = st.text_input("名称", key="wh_name")
+            with _wh2:
+                _wh_url = st.text_input("Webhook URL", key="wh_url")
+            with _wh3:
+                _wh_kind = st.selectbox("类型", store.WEBHOOK_KINDS, key="wh_kind")
+            if st.button("添加 Webhook", key="add_webhook"):
+                if _wh_name and _wh_url:
+                    store.add_webhook(_wh_name, _wh_url, _wh_kind)
+                    st.success("已添加")
+                    st.rerun()
+                else:
+                    st.warning("请填写名称与 URL")
+            for _w in store.list_webhooks():
+                _wc1, _wc2 = st.columns([4, 1], vertical_alignment="center")
+                with _wc1:
+                    st.markdown(
+                        f"**{_w['name']}**（{_w['kind']}）  \n"
+                        f"<span class='sg-rep-meta'>{_w['url'][:70]}</span>",
+                        unsafe_allow_html=True,
+                    )
+                with _wc2:
+                    if st.button("删除", key=f"del_webhook_{_w['id']}", use_container_width=True):
+                        store.delete_webhook(_w["id"])
+                        st.rerun()
 
 
 # ------------------ Main App UI ------------------ #
@@ -3116,20 +3178,15 @@ def _archive(
         _project = (project or st.session_state.get("project_name") or "").strip()
         if not _project:
             _project = (_desc[:24] + "…") if len(_desc) > 24 else (_desc or "未命名项目")
-        _rid = save_report(
-            kind=kind,
-            title=f"{KIND_LABELS.get(kind, kind)} · {_project}",
+        _generation.archive_result(
+            kind,
+            content_md,
+            content_json,
             project=_project,
-            content_md=content_md,
-            content_json=json.dumps(content_json, ensure_ascii=False) if content_json else None,
+            description=_desc,
             provider=st.session_state.get("model_provider", ""),
             model=st.session_state.get("selected_model", ""),
         )
-        upsert_project(_project, _desc)
-        if kind == "threat_model" and isinstance(content_json, dict):
-            add_threats(_project, _rid, list(content_json.get("threat_model") or []))
-        if kind == "dread" and isinstance(content_json, dict):
-            apply_dread_scores(_project, content_json)
         st.toast("已归档到「报告历史」")
     except Exception:
         pass
@@ -3142,7 +3199,7 @@ def _report_dialog(report: dict) -> None:
         f" · {report['created_at']} · {report['provider']}/{report['model']}"
     )
     st.markdown(report["content_md"])
-    _d1, _d2, _d3, _d4 = st.columns(4)
+    _d1, _d2, _d3, _d4, _d5 = st.columns(5)
     with _d1:
         st.download_button(
             "下载 Markdown",
@@ -3172,6 +3229,28 @@ def _report_dialog(report: dict) -> None:
                 use_container_width=True,
             )
     with _d4:
+        if report.get("kind") == "threat_model" and report.get("content_json"):
+            import json as _json
+
+            try:
+                _tm = _json.loads(report["content_json"]).get("threat_model") or []
+            except Exception:
+                _tm = []
+            st.download_button(
+                "下载 SARIF",
+                data=_json.dumps(
+                    _generation.threat_model_to_sarif(
+                        _tm, project=report.get("project") or "", description=""
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                file_name=f"report-{report['id']}.sarif",
+                mime="application/json",
+                key=f"dlg_sarif_{report['id']}",
+                use_container_width=True,
+            )
+    with _d5:
         if st.button("关闭", key=f"dlg_close_{report['id']}", use_container_width=True):
             st.session_state.pop("_report_view_id", None)
             st.rerun()
@@ -3588,19 +3667,31 @@ def _page_projects() -> None:
                                 "负责人", value=t["owner"], key=f"th_owner_{t['id']}"
                             )
                         st.text_input("备注", value=t["note"], key=f"th_note_{t['id']}")
-            if st.button("保存台账变更", type="primary", key="ws_save_threats"):
-                _edits = [
-                    {
-                        "id": t["id"],
-                        "status": st.session_state.get(f"th_status_{t['id']}", t["status"]),
-                        "owner": st.session_state.get(f"th_owner_{t['id']}", t["owner"]),
-                        "note": st.session_state.get(f"th_note_{t['id']}", t["note"]),
-                    }
-                    for t in _rows
-                ]
-                _n = update_threats(_edits)
-                st.success(f"已保存 {_n} 条变更。")
-                st.rerun()
+            _reg_c1, _reg_c2 = st.columns([1, 3])
+            with _reg_c1:
+                if st.button("保存台账变更", type="primary", key="ws_save_threats"):
+                    _edits = [
+                        {
+                            "id": t["id"],
+                            "status": st.session_state.get(f"th_status_{t['id']}", t["status"]),
+                            "owner": st.session_state.get(f"th_owner_{t['id']}", t["owner"]),
+                            "note": st.session_state.get(f"th_note_{t['id']}", t["note"]),
+                        }
+                        for t in _rows
+                    ]
+                    _n = update_threats(_edits)
+                    st.success(f"已保存 {_n} 条变更。")
+                    st.rerun()
+            with _reg_c2:
+                if st.button("推送到 Webhook", key="ws_push_webhooks"):
+                    _outcomes = _generation.push_webhooks(_sel, list_threats(project=_sel))
+                    _ok = [o for o in _outcomes if o.get("ok")]
+                    if _ok:
+                        st.success(f"已推送 {len(_ok)} 个 Webhook")
+                    else:
+                        st.warning(
+                            f"推送失败：{_outcomes[0].get('error') or _outcomes[0].get('status')}"
+                        )
 
     with _tab_board:
         _by_type = dict(

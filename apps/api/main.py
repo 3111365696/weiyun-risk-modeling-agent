@@ -1,0 +1,354 @@
+"""威云-风险建模智能体 REST API。
+
+启动：
+    uv run uvicorn apps.api.main:app --host 0.0.0.0 --port 8000
+
+鉴权：请求头 X-API-Key（在 Web「系统配置 → API 访问」中创建）。
+文档：启动后访问 http://localhost:8000/docs
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+_APPS_DIR = Path(__file__).resolve().parent.parent
+_REPO_ROOT = _APPS_DIR.parent
+for _p in (_REPO_ROOT, _APPS_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+from common import generation, store  # noqa: E402
+from fastapi import Depends, FastAPI, Header, HTTPException  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
+
+VERSION = "0.20.0"
+
+app = FastAPI(
+    title="威云-风险建模智能体 API",
+    version=VERSION,
+    description=(
+        "STRIDE 威胁建模能力接口：威胁模型、数据流图、攻击树、缓解措施、"
+        "DREAD 风险评估与测试用例。请求头需携带 X-API-Key。"
+    ),
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# 鉴权与模型
+# ---------------------------------------------------------------------------
+
+
+def require_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> str:
+    name = store.verify_api_key(x_api_key)
+    if not name:
+        raise HTTPException(status_code=401, detail="无效或已吊销的 API Key")
+    return name
+
+
+class Profile(BaseModel):
+    """应用画像（与 Web 界面一致）。"""
+
+    app_type: str = "Web application"
+    authentication: list[str] = Field(default_factory=list)
+    internet_facing: str = ""
+    sensitive_data: str = ""
+    dfd: str | None = Field(default=None, description="已确认的 Mermaid 数据流图（可选）")
+
+
+class GenerateRequest(BaseModel):
+    description: str = Field(..., description="应用描述")
+    project: str = Field(default="", description="项目名（用于归档；留空自动取名）")
+    profile: Profile = Field(default_factory=Profile)
+    provider: str | None = Field(default=None, description="覆盖默认模型提供商")
+    model: str | None = Field(default=None, description="覆盖默认模型")
+    save: bool = Field(default=True, description="是否归档到报告库与威胁台账")
+    threats_md: str | None = Field(
+        default=None, description="缓解措施/DREAD/测试用例可显式传入威胁模型 markdown"
+    )
+
+
+class FullPipelineRequest(BaseModel):
+    description: str
+    project: str = ""
+    profile: Profile = Field(default_factory=Profile)
+    provider: str | None = None
+    model: str | None = None
+
+
+class ThreatPatch(BaseModel):
+    status: str | None = None
+    owner: str | None = None
+    note: str | None = None
+
+
+class WebhookCreate(BaseModel):
+    name: str
+    url: str
+    kind: str = Field(default="generic", description="generic / feishu / wecom / dingtalk")
+
+
+def _project_name(req: GenerateRequest | FullPipelineRequest) -> str:
+    desc = (req.description or "").strip()
+    return (req.project or "").strip() or ((desc[:24] + "…") if len(desc) > 24 else (desc or "未命名项目"))
+
+
+def _settings(req) -> dict:
+    return generation.resolve_model_settings({"provider": req.provider, "model": req.model})
+
+
+def _latest_threats_md(project: str) -> str:
+    rows = store.list_reports(project=project, kind="threat_model", limit=1)
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail=f"项目「{project}」还没有威胁模型报告，无法生成依赖产物",
+        )
+    return rows[0]["content_md"]
+
+
+def _generate_one(kind: str, req: GenerateRequest, api_key_name: str) -> dict:
+    settings = _settings(req)
+    project = _project_name(req)
+    threats_md = req.threats_md or ""
+    if kind in generation.DEPENDENT_KINDS and not threats_md:
+        threats_md = _latest_threats_md(project)
+    try:
+        prompt = generation.build_prompt(kind, req.profile.model_dump(), req.description, threats_md)
+        content_md, content_json = generation.run_generation(kind, prompt, settings)
+    except generation.GenerationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"模型调用失败：{exc}") from exc
+
+    report_id = None
+    if req.save:
+        report_id = generation.archive_result(
+            kind,
+            content_md,
+            content_json,
+            project=project,
+            description=req.description,
+            provider=settings.get("provider", ""),
+            model=settings.get("model", ""),
+        )
+    return {
+        "ok": True,
+        "kind": kind,
+        "project": project,
+        "report_id": report_id,
+        "provider": settings.get("provider"),
+        "model": settings.get("model"),
+        "requested_by": api_key_name,
+        "markdown": content_md,
+        "json": content_json,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 基础
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/v1/health", summary="健康检查（无需鉴权）")
+def health() -> dict:
+    return {"ok": True, "service": "weiyun-stride-gpt", "version": VERSION}
+
+
+@app.get("/api/v1/config", summary="查看当前模型配置状态")
+def get_config(api_key_name: str = Depends(require_api_key)) -> dict:
+    settings = generation.resolve_model_settings()
+    return {
+        "provider": settings["provider"],
+        "model": settings["model"],
+        "api_key_configured": bool(settings.get("api_key")),
+        "api_base": settings.get("api_base"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 生成接口
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/v1/threat-model", summary="生成 STRIDE 威胁模型")
+def api_threat_model(req: GenerateRequest, api_key_name: str = Depends(require_api_key)) -> dict:
+    return _generate_one("threat_model", req, api_key_name)
+
+
+@app.post("/api/v1/dfd", summary="生成数据流图（Mermaid）")
+def api_dfd(req: GenerateRequest, api_key_name: str = Depends(require_api_key)) -> dict:
+    return _generate_one("dfd", req, api_key_name)
+
+
+@app.post("/api/v1/attack-tree", summary="生成攻击树（Mermaid）")
+def api_attack_tree(req: GenerateRequest, api_key_name: str = Depends(require_api_key)) -> dict:
+    return _generate_one("attack_tree", req, api_key_name)
+
+
+@app.post("/api/v1/mitigations", summary="生成缓解措施")
+def api_mitigations(req: GenerateRequest, api_key_name: str = Depends(require_api_key)) -> dict:
+    return _generate_one("mitigations", req, api_key_name)
+
+
+@app.post("/api/v1/dread", summary="生成 DREAD 风险评估")
+def api_dread(req: GenerateRequest, api_key_name: str = Depends(require_api_key)) -> dict:
+    return _generate_one("dread", req, api_key_name)
+
+
+@app.post("/api/v1/test-cases", summary="生成 Gherkin 测试用例")
+def api_test_cases(req: GenerateRequest, api_key_name: str = Depends(require_api_key)) -> dict:
+    return _generate_one("test_cases", req, api_key_name)
+
+
+@app.post("/api/v1/full-pipeline", summary="一键生成全套产物")
+def api_full_pipeline(req: FullPipelineRequest, api_key_name: str = Depends(require_api_key)) -> dict:
+    settings = _settings(req)
+    project = _project_name(req)
+    results = generation.run_full_pipeline(
+        description=req.description,
+        profile=req.profile.model_dump(),
+        project=project,
+        settings=settings,
+    )
+    return {
+        "ok": all(item.get("ok") for item in results),
+        "project": project,
+        "provider": settings.get("provider"),
+        "model": settings.get("model"),
+        "requested_by": api_key_name,
+        "steps": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 报告 / 项目 / 台账
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/v1/reports", summary="报告列表")
+def api_reports(
+    project: str | None = None,
+    kind: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+    api_key_name: str = Depends(require_api_key),
+) -> dict:
+    rows = store.list_reports(kind=kind, project=project, search=search, limit=limit)
+    for r in rows:
+        r.pop("content_md", None)
+        r.pop("content_json", None)
+    return {"ok": True, "count": len(rows), "reports": rows}
+
+
+@app.get("/api/v1/reports/{report_id}", summary="报告详情")
+def api_report(report_id: int, api_key_name: str = Depends(require_api_key)) -> dict:
+    row = store.get_report(report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    return {"ok": True, "report": row}
+
+
+@app.delete("/api/v1/reports/{report_id}", summary="删除报告")
+def api_delete_report(report_id: int, api_key_name: str = Depends(require_api_key)) -> dict:
+    if not store.get_report(report_id):
+        raise HTTPException(status_code=404, detail="报告不存在")
+    store.delete_report(report_id)
+    return {"ok": True, "deleted": report_id}
+
+
+@app.get("/api/v1/reports/{report_id}/sarif", summary="导出报告为 SARIF（仅威胁模型）")
+def api_report_sarif(report_id: int, api_key_name: str = Depends(require_api_key)) -> dict:
+    row = store.get_report(report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    if row["kind"] != "threat_model":
+        raise HTTPException(status_code=400, detail="仅威胁模型报告支持 SARIF 导出")
+    data = json.loads(row.get("content_json") or "{}")
+    return generation.threat_model_to_sarif(
+        list(data.get("threat_model") or []),
+        project=row.get("project") or "",
+        description="",
+        tool_version=VERSION,
+    )
+
+
+@app.get("/api/v1/projects", summary="项目列表")
+def api_projects(api_key_name: str = Depends(require_api_key)) -> dict:
+    store.sync_projects_from_reports()
+    return {"ok": True, "projects": store.list_projects()}
+
+
+@app.get("/api/v1/projects/{name}/threats", summary="项目威胁台账")
+def api_project_threats(
+    name: str,
+    status: str | None = None,
+    search: str | None = None,
+    api_key_name: str = Depends(require_api_key),
+) -> dict:
+    rows = store.list_threats(project=name, status=status, search=search)
+    return {"ok": True, "count": len(rows), "threats": rows}
+
+
+@app.patch("/api/v1/threats/{threat_id}", summary="更新威胁台账条目")
+def api_patch_threat(
+    threat_id: int,
+    patch: ThreatPatch,
+    api_key_name: str = Depends(require_api_key),
+) -> dict:
+    rows = [t for t in store.list_threats() if t["id"] == threat_id]
+    if not rows:
+        raise HTTPException(status_code=404, detail="威胁条目不存在")
+    current = rows[0]
+    store.update_threats(
+        [
+            {
+                "id": threat_id,
+                "status": patch.status or current["status"],
+                "owner": patch.owner if patch.owner is not None else current["owner"],
+                "note": patch.note if patch.note is not None else current["note"],
+            }
+        ]
+    )
+    return {"ok": True, "threat_id": threat_id}
+
+
+@app.post("/api/v1/projects/{name}/webhooks/push", summary="推送项目威胁台账到 Webhook")
+def api_push_webhooks(name: str, api_key_name: str = Depends(require_api_key)) -> dict:
+    threats = store.list_threats(project=name)
+    if not threats:
+        raise HTTPException(status_code=400, detail="该项目暂无威胁条目")
+    outcomes = generation.push_webhooks(name, threats)
+    return {"ok": all(o.get("ok") for o in outcomes), "outcomes": outcomes}
+
+
+# ---------------------------------------------------------------------------
+# Webhook 配置
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/v1/webhooks", summary="Webhook 列表")
+def api_list_webhooks(api_key_name: str = Depends(require_api_key)) -> dict:
+    return {"ok": True, "webhooks": store.list_webhooks()}
+
+
+@app.post("/api/v1/webhooks", summary="新增 Webhook")
+def api_add_webhook(body: WebhookCreate, api_key_name: str = Depends(require_api_key)) -> dict:
+    if body.kind not in store.WEBHOOK_KINDS:
+        raise HTTPException(status_code=400, detail=f"kind 必须是 {store.WEBHOOK_KINDS}")
+    webhook_id = store.add_webhook(body.name, body.url, body.kind)
+    return {"ok": True, "webhook_id": webhook_id}
+
+
+@app.delete("/api/v1/webhooks/{webhook_id}", summary="删除 Webhook")
+def api_delete_webhook(webhook_id: int, api_key_name: str = Depends(require_api_key)) -> dict:
+    store.delete_webhook(webhook_id)
+    return {"ok": True, "deleted": webhook_id}

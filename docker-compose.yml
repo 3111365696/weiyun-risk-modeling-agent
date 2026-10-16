@@ -49,3 +49,47 @@ services:
 
     # Restart policy for production
     restart: unless-stopped
+
+  # REST API 服务（与 UI 共用同一份 ~/.stride-gpt 数据卷/镜像依赖）
+  stridegpt-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    # 覆盖镜像默认的 streamlit 入口
+    entrypoint: ["python", "-m", "uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+      - /home/appuser/.stride-gpt:noexec,nosuid,size=100m
+
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+    env_file:
+      - .env
+
+    user: "1000:1000"
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+    restart: unless-stopped

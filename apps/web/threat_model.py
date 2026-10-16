@@ -1,4 +1,5 @@
 import streamlit as st
+from common.text import json_to_markdown
 
 from stride_gpt.core.prompts import (
     create_agentic_stride_prompt_section,
@@ -27,66 +28,7 @@ __all__ = [
 ]
 
 
-def _md_cell(value) -> str:
-    """Escape an LLM-supplied value for safe inclusion in a markdown table.
-
-    Pipes break out of the column; newlines break out of the row entirely and
-    let the model inject markdown beneath the table.
-    """
-    text = "" if value is None else str(value)
-    return text.replace("|", "\\|").replace("\r", " ").replace("\n", " ")
-
-
 # Function to convert JSON to Markdown for display.
-def json_to_markdown(threat_model, improvement_suggestions):
-    markdown_output = "## 威胁模型"
-
-    # Check which OWASP fields are present
-    has_owasp_llm = any(threat.get("OWASP_LLM") for threat in threat_model)
-    has_owasp_asi = any(threat.get("OWASP_ASI") for threat in threat_model)
-
-    if has_owasp_llm and has_owasp_asi:
-        # Full table with both OWASP columns (agentic applications)
-        markdown_output += "| 威胁类型 | 攻击场景 | 潜在影响 | OWASP LLM | OWASP ASI |"
-        markdown_output += "|-------------|----------|------------------|-----------|------------|"
-        for threat in threat_model:
-            owasp_llm = threat.get("OWASP_LLM") or "-"
-            owasp_asi = threat.get("OWASP_ASI") or "-"
-            markdown_output += (
-                f"| {_md_cell(threat['Threat Type'])} | {_md_cell(threat['Scenario'])} | {_md_cell(threat['Potential Impact'])} | {_md_cell(owasp_llm)} | {_md_cell(owasp_asi)} |\n"
-            )
-    elif has_owasp_llm:
-        # Table with OWASP LLM column only (GenAI applications)
-        markdown_output += "| 威胁类型 | 攻击场景 | 潜在影响 | OWASP LLM |"
-        markdown_output += "|-------------|----------|------------------|------------|\n"
-        for threat in threat_model:
-            owasp_llm = threat.get("OWASP_LLM") or "-"
-            markdown_output += (
-                f"| {_md_cell(threat['Threat Type'])} | {_md_cell(threat['Scenario'])} | {_md_cell(threat['Potential Impact'])} | {_md_cell(owasp_llm)} |\n"
-            )
-    elif has_owasp_asi:
-        # Table with OWASP ASI column only (edge case)
-        markdown_output += "| 威胁类型 | 攻击场景 | 潜在影响 | OWASP ASI |"
-        markdown_output += "|-------------|----------|------------------|------------|\n"
-        for threat in threat_model:
-            owasp_asi = threat.get("OWASP_ASI") or "-"
-            markdown_output += (
-                f"| {_md_cell(threat['Threat Type'])} | {_md_cell(threat['Scenario'])} | {_md_cell(threat['Potential Impact'])} | {_md_cell(owasp_asi)} |\n"
-            )
-    else:
-        # Standard table without OWASP columns
-        markdown_output += "| 威胁类型 | 攻击场景 | 潜在影响 |"
-        markdown_output += "|-------------|----------|------------------|\n"
-        for threat in threat_model:
-            markdown_output += (
-                f"| {_md_cell(threat['Threat Type'])} | {_md_cell(threat['Scenario'])} | {_md_cell(threat['Potential Impact'])} |\n"
-            )
-
-    markdown_output += "## 改进建议"
-    for suggestion in improvement_suggestions:
-        markdown_output += f"- {_md_cell(suggestion)}\n"
-
-    return markdown_output
 
 
 def create_image_analysis_prompt():

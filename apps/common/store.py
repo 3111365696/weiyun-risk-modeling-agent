@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import io
@@ -20,7 +21,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-DATA_DIR = Path(os.path.expanduser("~/.stride-gpt"))
+DATA_DIR = Path.home() / ".stride-gpt"
 CONFIG_FILE = DATA_DIR / "web_config.json"
 KEY_FILE = DATA_DIR / "web_key"
 DB_FILE = DATA_DIR / "web.db"
@@ -74,10 +75,8 @@ def _fernet():
     else:
         key = Fernet.generate_key()
         KEY_FILE.write_bytes(key)
-        try:
+        with contextlib.suppress(OSError):
             KEY_FILE.chmod(0o600)
-        except OSError:
-            pass
     return Fernet(key)
 
 
@@ -90,10 +89,8 @@ def save_config(values: dict) -> str:
     ).encode("utf-8")
     _ensure_dir()
     CONFIG_FILE.write_bytes(_fernet().encrypt(payload))
-    try:
+    with contextlib.suppress(OSError):
         CONFIG_FILE.chmod(0o600)
-    except OSError:
-        pass
     return saved_at
 
 
@@ -120,10 +117,8 @@ def config_saved_at() -> str | None:
 
 def clear_config() -> None:
     for f in (CONFIG_FILE, KEY_FILE):
-        try:
+        with contextlib.suppress(OSError):
             f.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +197,30 @@ def init_db() -> None:
             )
             """
         )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL DEFAULT '',
+                key_hash TEXT NOT NULL UNIQUE,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT '',
+                last_used_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS webhooks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL DEFAULT 'generic',
+                url TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
 
 
 def save_report(
@@ -275,15 +294,6 @@ def delete_report(report_id: int) -> None:
     init_db()
     with _conn() as c:
         c.execute("DELETE FROM reports WHERE id = ?", (report_id,))
-
-
-def list_projects() -> list[str]:
-    init_db()
-    with _conn() as c:
-        rows = c.execute(
-            "SELECT DISTINCT project FROM reports WHERE project != '' ORDER BY project"
-        ).fetchall()
-    return [r["project"] for r in rows]
 
 
 def report_count() -> int:
@@ -595,7 +605,7 @@ def update_threats(edits: list[dict]) -> int:
 
 def threat_stats(project: str) -> dict:
     rows = list_threats(project=project)
-    by_status = {s: 0 for s in THREAT_STATUSES}
+    by_status = dict.fromkeys(THREAT_STATUSES, 0)
     by_type: dict[str, int] = {}
     for r in rows:
         by_status[r["status"]] = by_status.get(r["status"], 0) + 1
@@ -683,10 +693,8 @@ def _session_secret() -> bytes:
     _ensure_dir()
     secret = os.urandom(32).hex().encode("utf-8")
     f.write_bytes(secret)
-    try:
+    with contextlib.suppress(OSError):
         f.chmod(0o600)
-    except OSError:
-        pass
     return secret
 
 
@@ -739,3 +747,123 @@ def backfill_project(project: str) -> int:
         if r["kind"] == "dread":
             apply_dread_scores(project, data or {})
     return added
+
+
+# ---------------------------------------------------------------------------
+# API Key 管理
+# ---------------------------------------------------------------------------
+
+API_KEY_PREFIX = "wy_"
+
+
+def _hash_api_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def create_api_key(name: str) -> str:
+    """创建 API Key，返回明文（仅此一次可见）。"""
+    init_db()
+    plain = API_KEY_PREFIX + base64.urlsafe_b64encode(os.urandom(24)).decode("ascii").rstrip("=")
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO api_keys(name, key_hash, enabled, created_at, last_used_at)"
+            " VALUES(?, ?, 1, ?, '')",
+            (name or "未命名", _hash_api_key(plain), _now()),
+        )
+    return plain
+
+
+def verify_api_key(key: str | None) -> str | None:
+    """校验 API Key；有效则返回名称并刷新 last_used_at。"""
+    if not key:
+        return None
+    init_db()
+    with _conn() as c:
+        row = c.execute(
+            "SELECT id, name, enabled FROM api_keys WHERE key_hash = ?",
+            (_hash_api_key(key),),
+        ).fetchone()
+        if not row or not row["enabled"]:
+            return None
+        c.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (_now(), row["id"]))
+    return str(row["name"])
+
+
+def list_api_keys() -> list[dict]:
+    init_db()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id, name, enabled, created_at, last_used_at FROM api_keys ORDER BY id DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def revoke_api_key(key_id: int) -> None:
+    init_db()
+    with _conn() as c:
+        c.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
+
+
+# ---------------------------------------------------------------------------
+# Webhook（工单/通知集成）
+# ---------------------------------------------------------------------------
+
+WEBHOOK_KINDS = ["generic", "feishu", "wecom", "dingtalk"]
+
+
+def add_webhook(name: str, url: str, kind: str = "generic") -> int:
+    init_db()
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT INTO webhooks(name, kind, url, enabled, created_at) VALUES(?, ?, ?, 1, ?)",
+            (name or "未命名", kind or "generic", url, _now()),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def list_webhooks() -> list[dict]:
+    init_db()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id, name, kind, url, enabled, created_at FROM webhooks ORDER BY id DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_webhook(webhook_id: int) -> None:
+    init_db()
+    with _conn() as c:
+        c.execute("DELETE FROM webhooks WHERE id = ?", (webhook_id,))
+
+
+def threat_webhook_payload(kind: str, project: str, threats: list[dict]) -> dict:
+    """按 webhook 类型构造推送体。"""
+    lines = [f"【{project}】威胁台账推送（{len(threats)} 条）"]
+    for t in threats[:20]:
+        score = f"{float(t['risk_score']):.1f}" if t.get("risk_score") is not None else "-"
+        lines.append(
+            f"· [{t.get('threat_type')}] {t.get('scenario')} | 风险 {score} | {t.get('status')}"
+        )
+        if t.get("owner"):
+            lines[-1] += f" | 负责 {t['owner']}"
+    text = "\n".join(lines)
+    if kind == "feishu":
+        return {"msg_type": "text", "content": {"text": text}}
+    if kind in ("wecom", "dingtalk"):
+        return {"msgtype": "text", "text": {"content": text}}
+    return {
+        "event": "threat_register.push",
+        "project": project,
+        "threats": [
+            {
+                "threat_type": t.get("threat_type"),
+                "scenario": t.get("scenario"),
+                "impact": t.get("impact"),
+                "risk_score": t.get("risk_score"),
+                "status": t.get("status"),
+                "owner": t.get("owner"),
+                "note": t.get("note"),
+            }
+            for t in threats
+        ],
+    }
