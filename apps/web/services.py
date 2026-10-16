@@ -95,7 +95,7 @@ def _archive(
         ).strip()
         _project = (project or st.session_state.get("project_name") or "").strip()
         if not _project:
-            _project = (_desc[:24] + "…") if len(_desc) > 24 else (_desc or "未命名项目")
+            _project = (_desc[:24] + "…") if len(_desc) > 24 else (_desc or _t("未命名项目", "Untitled project"))
         _used_project = _project
         _generation.archive_result(
             kind,
@@ -106,16 +106,16 @@ def _archive(
             provider=st.session_state.get("model_provider", ""),
             model=st.session_state.get("selected_model", ""),
         )
-        st.toast("已归档到「报告历史」")
+        st.toast(_t("已归档到「报告历史」", "Archived to report history"))
     except Exception:
         pass
     return _used_project
 
 
-@st.dialog("报告详情", width="large")
 def _report_dialog(report: dict) -> None:
+    """报告详情弹窗内容（由 show_report_dialog 动态套上 dialog，标题随语言切换）。"""
     st.caption(
-        f"{_kind_label(report['kind'])} · {report['project'] or '未命名'}"
+        f"{_kind_label(report['kind'])} · {report['project'] or _t('未命名', 'Untitled')}"
         f" · {report['created_at']} · {report['provider']}/{report['model']}"
     )
     if report.get("kind") == "threat_model" and report.get("content_json"):
@@ -126,9 +126,13 @@ def _report_dialog(report: dict) -> None:
                 _json.loads(report["content_json"]).get("threat_model") or []
             )
             st.caption(
-                "STRIDE 覆盖度："
+                _t("STRIDE 覆盖度：", "STRIDE coverage: ")
                 + " · ".join(f"{k} {v}" for k, v in _cov["counts"].items() if v)
-                + (f" · 缺失：{'、'.join(_cov['missing'])}" if _cov["missing"] else " · 六类齐全")
+                + (
+                    _t(" · 缺失：", " · missing: ") + "、".join(_cov["missing"])
+                    if _cov["missing"]
+                    else _t(" · 六类齐全", " · all six covered")
+                )
             )
         except Exception:
             pass
@@ -149,7 +153,7 @@ def _report_dialog(report: dict) -> None:
                 with st.spinner(_t("正在生成 PDF…", "Generating PDF…")):
                     st.session_state[f"_pdf_{report['id']}"] = _exporters.report_to_pdf(report)
             except Exception as _exc:
-                st.error(f"PDF 生成失败：{_exc}")
+                st.error(_t(f"PDF 生成失败：{_exc}", f"PDF generation failed: {_exc}"))
     with _dl3:
         _pdf_bytes = st.session_state.get(f"_pdf_{report['id']}")
         if _pdf_bytes:
@@ -332,7 +336,12 @@ def _run_model(kind: str, prompt: str):
     }
     _fn = (_table.get(kind) or {}).get(_provider)
     if _fn is None:
-        raise RuntimeError(f"当前提供商（{_provider}）不支持「{kind}」生成")
+        raise RuntimeError(
+            _t(
+                f"当前提供商（{_provider}）不支持「{kind}」生成",
+                f"The current provider ({_provider}) does not support generating “{kind}”.",
+            )
+        )
     return _fn()
 
 
@@ -361,15 +370,20 @@ def _run_full_pipeline(project: str, description: str) -> None:
     st.session_state["app_desc"] = _desc
 
     _steps = [_t("威胁模型", "Threat Model"), _t("数据流图", "Data Flow Diagram"), _t("攻击树", "Attack Tree"), _t("缓解措施", "Mitigations"), _t("DREAD 风险评估", "DREAD Assessment"), _t("测试用例", "Test Cases")]
-    _bar = st.progress(0.0, text="准备中…")
+    _bar = st.progress(0.0, text=_t("准备中…", "Preparing…"))
     _log = st.container()
     _tm_md = ""
 
     for _i, _label in enumerate(_steps, 1):
-        _bar.progress((_i - 1) / len(_steps), text=f"正在生成：{_label}")
+        _bar.progress((_i - 1) / len(_steps), text=_t(f"正在生成：{_label}", f"Generating: {_label}"))
         if _label in (_t("缓解措施", "Mitigations"), _t("DREAD 风险评估", "DREAD Assessment"), _t("测试用例", "Test Cases")) and not _tm_md:
             with _log:
-                st.markdown(f"- ⏭️ {_label}（跳过：威胁模型未生成成功）")
+                st.markdown(
+                        _t(
+                            f"- ⏭️ {_label}（跳过：威胁模型未生成成功）",
+                            f"- ⏭️ {_label} (skipped: the threat model was not generated)",
+                        )
+                    )
             continue
         try:
             if _label == _t("威胁模型", "Threat Model"):
@@ -445,8 +459,13 @@ def _run_full_pipeline(project: str, description: str) -> None:
                 st.markdown(f"- ✅ {_label}")
         except Exception as _e:
             with _log:
-                st.markdown(f"- ⚠️ {_label} 失败：{_e}")
-        _bar.progress(_i / len(_steps), text=f"{_label} 完成")
-    _bar.progress(1.0, text="全流程完成")
+                st.markdown(_t(f"- ⚠️ {_label} 失败：{_e}", f"- ⚠️ {_label} failed: {_e}"))
+        _bar.progress(_i / len(_steps), text=_t(f"{_label} 完成", f"{_label} done"))
+    _bar.progress(1.0, text=_t("全流程完成", "Full pipeline done"))
     st.success(_t("全流程生成完成，结果已归档到本项目。", "Full pipeline finished; results archived to this project."))
     st.rerun()
+
+
+def show_report_dialog(report: dict) -> None:
+    """打开「报告详情」弹窗（标题随界面语言；装饰器方式会把标题固定在导入时）。"""
+    st.dialog(_t("报告详情", "Report details"), width="large")(_report_dialog)(report)

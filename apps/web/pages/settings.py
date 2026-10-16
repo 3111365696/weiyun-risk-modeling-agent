@@ -412,7 +412,7 @@ def render_settings() -> None:
                                 f"到期 {_k['expires_at'][:10]}",
                                 f"expires {_k['expires_at'][:10]}",
                             )
-                            + ("（已过期）" if _k.get("expired") else "")
+                            + (_t("（已过期）", " (expired)") if _k.get("expired") else "")
                         )
                     else:
                         _bits.append(_t("不过期", "no expiry"))

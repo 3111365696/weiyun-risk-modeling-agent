@@ -163,7 +163,7 @@ def _page_threat_model() -> None:
                 )
             else:
                 uploaded_file = st.file_uploader(
-                    "上传架构图", type=["jpg", "jpeg", "png"]
+                    _t("上传架构图", "Upload architecture diagram"), type=["jpg", "jpeg", "png"]
                 )
 
                 if uploaded_file is not None:
@@ -228,7 +228,7 @@ def _page_threat_model() -> None:
                                 _t("图片分析失败，请检查 API Key 后重试。", "Image analysis failed; check the API key and retry.")
                             )
                     except Exception as e:
-                        st.error(f"分析图片时发生错误：{e!s}")
+                        st.error(_t(f"分析图片时发生错误：{e!s}", f"Error while analysing the image: {e!s}"))
 
         with _draw_tab:
             if st.button(_t("打开图表编辑器", "Open diagram editor"), key="toggle_drawio", use_container_width=True):
@@ -486,12 +486,21 @@ def _page_threat_model() -> None:
                 except Exception as e:
                     retry_count += 1
                     if retry_count == max_retries:
-                        st.error(f"生成威胁模型失败，已重试 {max_retries} 次：{e}")
+                        st.error(_t(_t(
+                                f"生成威胁模型失败，已重试 {max_retries} 次：{e}",
+                                f"Failed to generate the threat model after {max_retries} retries: {e}",
+                            ), f"Failed to generate the threat model after {max_retries} retries: {e}"))
                         threat_model = []
                         improvement_suggestions = []
                     else:
                         st.warning(
-                            f"生成威胁模型失败，正在重试第 {retry_count + 1}/{max_retries}..."
+                            _t(
+                                _t(
+                                f"生成威胁模型失败，正在重试第 {retry_count + 1}/{max_retries}...",
+                                f"Failed to generate the threat model; retrying ({retry_count + 1}/{max_retries})...",
+                            ),
+                                f"Failed to generate the threat model; retrying ({retry_count + 1}/{max_retries})...",
+                            )
                         )
 
 # Display threat model output on tab1 (must be in tab1 context to only show on that tab)
@@ -512,7 +521,7 @@ def _page_threat_model() -> None:
             )
         ):
             thinking_model = "Claude" if _state("model_provider") == "Anthropic API" else "Gemini"
-            with st.expander(f"查看 {thinking_model} 的思考过程"):
+            with st.expander(_t(f"查看 {thinking_model} 的思考过程", f"View reasoning of {thinking_model}")):
                 st.markdown(st.session_state["last_thinking_content"])
 
         # Display the threat model in Markdown

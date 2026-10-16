@@ -104,7 +104,7 @@ def _page_mitigations() -> None:
                             thinking_model = (
                                 "Claude" if _state("model_provider") == "Anthropic API" else "Gemini"
                             )
-                            with st.expander(f"查看 {thinking_model} 的思考过程"):
+                            with st.expander(_t(f"查看 {thinking_model} 的思考过程", f"View reasoning of {thinking_model}")):
                                 st.markdown(st.session_state["last_thinking_content"])
 
                         _archive("mitigations", mitigations_markdown)
@@ -126,12 +126,24 @@ def _page_mitigations() -> None:
                         retry_count += 1
                         if retry_count == max_retries:
                             st.error(
-                                f"生成缓解措施失败，已重试 {max_retries} 次：{e}"
+                                _t(
+                                    _t(
+                                f"生成缓解措施失败，已重试 {max_retries} 次：{e}",
+                                f"Failed to generate the mitigations after {max_retries} retries: {e}",
+                            ),
+                                    f"Failed to generate the mitigations after {max_retries} retries: {e}",
+                                )
                             )
                             mitigations_markdown = ""
                         else:
                             st.warning(
-                                f"生成缓解措施失败，正在重试第 {retry_count + 1}/{max_retries}..."
+                                _t(
+                                    _t(
+                                f"生成缓解措施失败，正在重试第 {retry_count + 1}/{max_retries}...",
+                                f"Failed to generate the mitigations; retrying ({retry_count + 1}/{max_retries})...",
+                            ),
+                                    f"Failed to generate the mitigations; retrying ({retry_count + 1}/{max_retries})...",
+                                )
                             )
 
             st.markdown("")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import streamlit as st
 from services import (
     _kind_label,
-    _report_dialog,
+    show_report_dialog,
 )
 from shared import (
     KIND_LABELS,
@@ -56,7 +56,12 @@ def _page_reports() -> None:
         limit=300,
     )
 
-    st.caption(f"共 {len(_filtered)} 条记录（库内总计 {report_count()} 条）")
+    st.caption(
+            _t(
+                f"共 {len(_filtered)} 条记录（库内总计 {report_count()} 条）",
+                f"{len(_filtered)} of {report_count()} reports shown",
+            )
+        )
     if not _filtered:
         st.info(_t("暂无历史报告。生成威胁模型、攻击树、数据流图等结果后会自动归档到这里。", "No reports yet. Generated threat models, attack trees, DFDs and more are archived here automatically."))
         return
@@ -66,7 +71,7 @@ def _page_reports() -> None:
             _c1, _c2 = st.columns([5, 2.6], vertical_alignment="center")
             with _c1:
                 st.markdown(
-                    f"**{_kind_label(_r['kind'])}** · {_r['project'] or '未命名'}"
+                    f"**{_kind_label(_r['kind'])}** · {_r['project'] or _t('未命名', 'Untitled')}"
                     f"  \n<span class='sg-rep-meta'>{_r['created_at']} · "
                     f"{_r['provider']}/{_r['model']}</span>",
                     unsafe_allow_html=True,
@@ -107,6 +112,6 @@ def _page_reports() -> None:
     if _view_id:
         _rep = get_report(int(_view_id))
         if _rep:
-            _report_dialog(_rep)
+            show_report_dialog(_rep)
         else:
             st.session_state.pop("_report_view_id", None)

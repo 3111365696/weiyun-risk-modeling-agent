@@ -112,16 +112,16 @@ def _page_attack_tree() -> None:
                         )
                     ):
                         thinking_model = "Claude" if _state("model_provider") == "Anthropic API" else "Gemini"
-                        with st.expander(f"查看 {thinking_model} 的思考过程"):
+                        with st.expander(_t(f"查看 {thinking_model} 的思考过程", f"View reasoning of {thinking_model}")):
                             st.markdown(st.session_state["last_thinking_content"])
 
                     _archive("attack_tree", mermaid_code)
                     # Display the generated attack tree code
-                    st.write("攻击树代码：")
+                    st.write(_t("攻击树代码：", "Attack tree code:"))
                     st.code(mermaid_code)
 
                     # Visualise the attack tree using the Mermaid custom component
-                    st.write("攻击树图预览：")
+                    st.write(_t("攻击树图预览：", "Attack tree preview:"))
                     mermaid(mermaid_code)
 
                     col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1])
@@ -155,4 +155,4 @@ def _page_attack_tree() -> None:
                         st.write("")
 
                 except Exception as e:
-                    st.error(f"生成攻击树失败：{e}")
+                    st.error(_t(f"生成攻击树失败：{e}", f"Failed to generate attack tree: {e}"))

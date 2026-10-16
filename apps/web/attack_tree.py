@@ -1,6 +1,7 @@
 import re
 
 import streamlit as st
+from common import i18n as _i18n
 from common.text import create_attack_tree_prompt  # noqa: F401  (re-export 供 main.py 使用)
 
 from stride_gpt.core.attack_tree import generate_attack_tree
@@ -284,7 +285,7 @@ def get_attack_tree_groq(groq_api_key, groq_model, prompt):
     config = LLMConfig(provider="Groq API", model_name=groq_model, api_key=groq_api_key)
     mermaid, response = generate_attack_tree(config, prompt)
     if response.reasoning:
-        with st.expander("查看模型推理过程", expanded=False):
+        with st.expander(_i18n.t("查看模型推理过程", "View model reasoning"), expanded=False):
             st.write(response.reasoning)
     return mermaid
 

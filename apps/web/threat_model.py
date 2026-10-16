@@ -1,4 +1,5 @@
 import streamlit as st
+from common import i18n as _i18n
 from common.text import json_to_markdown
 
 from stride_gpt.core.prompts import (
@@ -141,6 +142,6 @@ def get_threat_model_groq(groq_api_key, groq_model, prompt):
     config = LLMConfig(provider="Groq API", model_name=groq_model, api_key=groq_api_key)
     result, response = generate_threat_model(config, prompt)
     if response.reasoning:
-        with st.expander("查看模型推理过程", expanded=False):
+        with st.expander(_i18n.t("查看模型推理过程", "View model reasoning"), expanded=False):
             st.write(response.reasoning)
     return {"threat_model": result.threat_model, "improvement_suggestions": result.improvement_suggestions}

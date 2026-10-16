@@ -47,7 +47,8 @@ def render_login() -> None:
     left, right = st.columns([1.15, 1], gap="large")
     with left:
         st.markdown(
-            f"""
+            _t(
+                f"""
             <div class="sg-hero">
               <div class="sg-kicker">SECURE CONSOLE</div>
               <svg class="sg-mark" viewBox="0 0 120 120" fill="none" aria-hidden="true">
@@ -96,6 +97,56 @@ def render_login() -> None:
               </div>
             </div>
             """,
+                f"""
+            <div class="sg-hero">
+              <div class="sg-kicker">SECURE CONSOLE</div>
+              <svg class="sg-mark" viewBox="0 0 120 120" fill="none" aria-hidden="true">
+                <defs>
+                  <linearGradient id="sgGrad" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0%" stop-color="#C3B8FF"/>
+                    <stop offset="100%" stop-color="#6C59C9"/>
+                  </linearGradient>
+                </defs>
+                <path class="sg-shield" d="M60 6 L106 24 V58 C106 85 87 106 60 114 C33 106 14 85 14 58 V24 Z"
+                      stroke="url(#sgGrad)" stroke-width="1.6"/>
+                <path class="sg-wire" d="M40 46 H58 V64 H82"/>
+                <path class="sg-wire" d="M44 78 H76"/>
+                <path class="sg-wire" d="M60 34 V46"/>
+                <circle class="sg-node" cx="40" cy="46" r="3"/>
+                <circle class="sg-node" cx="82" cy="64" r="3"/>
+                <circle class="sg-node" cx="60" cy="34" r="3"/>
+                <circle class="sg-node" cx="44" cy="78" r="3"/>
+                <circle class="sg-node" cx="76" cy="78" r="3"/>
+              </svg>
+              <h1 class="sg-hero-title">Weiyun Risk Modeling Agent</h1>
+              <p class="sg-hero-desc">A STRIDE threat-modeling console for engineering and security teams: start from a codebase or an architecture description and get threat models, attack trees, data-flow diagrams and DREAD assessments.</p>
+              <div class="sg-grid">
+                <div class="sg-tile">
+                  <div class="sg-tile-title"><span class="sg-tile-dot"></span>Agentic code audit</div>
+                  <div class="sg-tile-desc">Explores the codebase and attaches evidence and line numbers to every threat</div>
+                </div>
+                <div class="sg-tile">
+                  <div class="sg-tile-title"><span class="sg-tile-dot"></span>Full-stack coverage</div>
+                  <div class="sg-tile-desc">STRIDE · OWASP LLM/ASI · MITRE ATT&amp;CK/ATLAS</div>
+                </div>
+                <div class="sg-tile">
+                  <div class="sg-tile-title"><span class="sg-tile-dot"></span>Reports &amp; integrations</div>
+                  <div class="sg-tile-desc">Markdown · JSON · SARIF · HTML, ready for CI pipelines</div>
+                </div>
+                <div class="sg-tile">
+                  <div class="sg-tile-title"><span class="sg-tile-dot"></span>Multiple model providers</div>
+                  <div class="sg-tile-desc">OpenAI · Anthropic · Gemini · DeepSeek · local models</div>
+                </div>
+              </div>
+              <div class="sg-console">&gt; system ready · threat-engine online · awaiting authorization<span class="sg-cursor"></span></div>
+              <div class="sg-status">
+                <span><span class="sg-dot"></span>All services operational</span>
+                <span>v{_APP_VERSION}</span>
+                <span>LAN deployment</span>
+              </div>
+            </div>
+            """,
+            ),
             unsafe_allow_html=True,
         )
     with right, st.container(border=True, key="login_card"):
@@ -111,7 +162,7 @@ def render_login() -> None:
                 submitted = st.form_submit_button(
                     _t("登 录", "Sign in"), use_container_width=True, type="primary"
                 )
-            _identifier = (username or "").strip() or "未知用户"
+            _identifier = (username or "").strip() or _t("未知用户", "unknown user")
             _lock = store.login_lock_status(_identifier)
             if _lock["locked"]:
                 st.error(
@@ -203,9 +254,14 @@ def _logout_dialog() -> None:
     _user = st.session_state.get("user", "")
     _role = _role_display()
     _at = st.session_state.get("login_at", "")
-    st.markdown(f"当前用户：**{html.escape(_user)}** · {html.escape(_role)}")
+    st.markdown(
+            _t(
+                f"当前用户：**{html.escape(_user)}** · {html.escape(_role)}",
+                f"Signed in as **{html.escape(_user)}** · {html.escape(_role)}",
+            )
+        )
     if _at:
-        st.caption(f"本次登录时间：{_at}")
+        st.caption(_t(f"本次登录时间：{_at}", f"Signed in at {_at}"))
     st.markdown(_t("确认要退出系统吗？未保存的表单内容将丢失。", "Sign out? Unsaved form content will be lost."))
     _c1, _c2 = st.columns(2)
     with _c1:

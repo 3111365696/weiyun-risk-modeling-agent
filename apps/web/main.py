@@ -215,7 +215,7 @@ if st.sidebar.button(_t("退出登录", "Sign out"), key="logout", use_container
 
 with st.sidebar:
     st.selectbox(
-        "界面语言 / Language",
+        _t("界面语言", "Language"),
         options=list(_i18n.LANGUAGES),
         format_func=lambda key: _i18n.LANGUAGES[key],
         key="ui_language",
@@ -418,7 +418,7 @@ if st.session_state.get("_current_page") != _pg.title:
     st.session_state["nav_page"] = _pg.title
 
 _nav = st.segmented_control(
-    "页面导航",
+    _t("页面导航", "Page navigation"),
     list(_PAGE_PAGES),
     key="nav_page",
     label_visibility="collapsed",

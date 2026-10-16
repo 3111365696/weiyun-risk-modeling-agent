@@ -58,10 +58,10 @@ def _page_data_flow() -> None:
         )
         if dfd_vision_supported:
             uploaded_dfd_image = st.file_uploader(
-                "上传 DFD 图片",
+                _t("上传 DFD 图片", "Upload DFD image"),
                 type=["jpg", "jpeg", "png"],
                 key="dfd_image_uploader",
-                help="支持 PNG 或 JPEG。图表将解析为下方可编辑的 Mermaid 代码。",
+                help=_t("支持 PNG 或 JPEG。图表将解析为下方可编辑的 Mermaid 代码。", "PNG or JPEG. The diagram is converted into editable Mermaid code below."),
             )
         else:
             uploaded_dfd_image = None
@@ -90,8 +90,10 @@ def _page_data_flow() -> None:
         )
         if _state("model_provider") != "LM Studio Server" and not _dfd_api_key:
             st.error(
-                f"请输入你的 {_state("model_provider")} Key（可在侧边栏填写，或写入 "
-                ".env 文件）后再生成 DFD。"
+                _t(
+                    f"请输入你的 {_state('model_provider')} Key（可在侧边栏填写，或写入 .env 文件）后再生成 DFD。",
+                    f"Enter your {_state('model_provider')} key (sidebar or .env file) before generating the DFD.",
+                )
             )
         else:
             with st.spinner(_t("正在生成数据流图……", "Generating data flow diagram…")):
@@ -123,7 +125,7 @@ def _page_data_flow() -> None:
                     st.session_state.pop("confirmed_dfd", None)
                     _archive("dfd", dfd_mermaid)
                 except Exception as e:
-                    st.error(f"生成 DFD 失败：{e}")
+                    st.error(_t(f"生成 DFD 失败：{e}", f"Failed to generate the DFD: {e}"))
     elif dfd_generate_button and not st.session_state.get("app_input"):
         st.error(_t("请先在威胁模型标签页输入应用详情。", "Enter application details on the Threat model page first."))
 
@@ -136,7 +138,10 @@ def _page_data_flow() -> None:
         if st.session_state.get("dfd_last_upload_key") != upload_key:
             if not _dfd_api_key:
                 st.error(
-                    f"请输入你的 {_state("model_provider")} Key（在侧边栏填写）后再上传 DFD 图片。"
+                    _t(
+                        f"请输入你的 {_state('model_provider')} Key（在侧边栏填写）后再上传 DFD 图片。",
+                        f"Enter your {_state('model_provider')} key in the sidebar before uploading a DFD image.",
+                    )
                 )
             else:
                 with st.spinner(_t("正在解析 DFD 图片……", "Parsing DFD image…")):
@@ -165,7 +170,7 @@ def _page_data_flow() -> None:
                         st.session_state.pop("confirmed_dfd", None)
                         _archive("dfd", dfd_mermaid)
                     except Exception as e:
-                        st.error(f"解析 DFD 图片失败：{e}")
+                        st.error(_t(f"解析 DFD 图片失败：{e}", f"Failed to parse the DFD image: {e}"))
 
     # --- Section 4: Editor + Preview --- #
 
@@ -187,7 +192,7 @@ def _page_data_flow() -> None:
         try:
             mermaid(dfd_editor_value)
         except Exception as e:
-            st.warning(f"无法渲染预览：{e}")
+            st.warning(_t(f"无法渲染预览：{e}", f"Unable to render the preview: {e}"))
 
         # --- Section 5: Confirm + Download --- #
 

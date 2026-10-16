@@ -8,6 +8,7 @@ plumbing for thinking/reasoning displays.
 from __future__ import annotations
 
 import streamlit as st
+from common import i18n as _i18n
 
 from stride_gpt.core.dfd import generate_dfd, parse_dfd_from_image
 from stride_gpt.core.schemas import LLMConfig
@@ -62,7 +63,7 @@ def get_dfd_groq(api_key: str, model_name: str, prompt: str) -> str:
     config = LLMConfig(provider="Groq API", model_name=model_name, api_key=api_key)
     mermaid, response = generate_dfd(config, prompt)
     if response.reasoning:
-        with st.expander("查看模型推理过程", expanded=False):
+        with st.expander(_i18n.t("查看模型推理过程", "View model reasoning"), expanded=False):
             st.write(response.reasoning)
     return mermaid
 

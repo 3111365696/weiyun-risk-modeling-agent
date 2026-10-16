@@ -44,24 +44,32 @@ def _page_projects() -> None:
     _m1.metric(_t("产物数量", "Artifacts"), _proj.get("report_count", 0))
     _m2.metric(_t("威胁总数", "Total threats"), _stats["total"])
     _m3.metric(_t("待处理", "Open"), _stats["by_status"].get(_t("待处理", "Open"), 0))
-    _m4.metric(_t("已修复", "Fixed"), _stats["by_status"].get(_t("已修复", "Fixed"), 0))
+    _m4.metric(_t("已修复", "Fixed"), _stats["by_status"].get("已修复", 0))
 
-    _tab_overview, _tab_register, _tab_board = st.tabs(["项目概览", "威胁台账", "风险看板"])
+    _tab_overview, _tab_register, _tab_board = st.tabs(
+        [_t("项目概览", "Overview"), _t("威胁台账", "Threat register"), _t("风险看板", "Risk board")]
+    )
 
     with _tab_overview:
         _latest_models = _generation.latest_threat_models(_sel, limit=1)
         if _latest_models:
             _cov = _generation.stride_coverage(_latest_models[0])
             st.caption(
-                "STRIDE 覆盖度："
+                _t("STRIDE 覆盖度：", "STRIDE coverage: ")
                 + " · ".join(f"{k} {v}" for k, v in _cov["counts"].items() if v)
-                + (f" · 缺失：{'、'.join(_cov['missing'])}" if _cov["missing"] else " · 六类齐全")
+                + (
+                    _t(" · 缺失：", " · missing: ") + "、".join(_cov["missing"])
+                    if _cov["missing"]
+                    else _t(" · 六类齐全", " · all six covered")
+                )
             )
         _diff = _generation.diff_latest_threat_models(_sel)
         if _diff:
             with st.expander(
-                f"变更对比（最近两次威胁模型）：新增 {_diff['added_count']} ·"
-                f" 消失 {_diff['removed_count']} · 未变 {_diff['unchanged_count']}"
+                _t(
+                    f"变更对比（最近两次威胁模型）：新增 {_diff['added_count']} · 消失 {_diff['removed_count']} · 未变 {_diff['unchanged_count']}",
+                    f"Drift (last two threat models): {_diff['added_count']} added · {_diff['removed_count']} removed · {_diff['unchanged_count']} unchanged",
+                )
             ):
                 if _diff["added"]:
                     st.markdown(_t("**新增威胁**", "**New threats**"))
@@ -104,7 +112,7 @@ def _page_projects() -> None:
             _sc1, _sc2, _sc3 = st.columns([1.3, 1.3, 2.4], vertical_alignment="bottom")
             with _sc1:
                 _interval_h = st.number_input(
-                    "检查间隔（小时）",
+                    _t("检查间隔（小时）", "Check interval (hours)"),
                     min_value=1,
                     max_value=168,
                     value=max(1, round((_sched or {}).get("interval_minutes", 1440) / 60)),
@@ -138,8 +146,10 @@ def _page_projects() -> None:
                             st.session_state.get("user", ""), "手动执行定时计划", _sel
                         )
                         st.success(
-                            f"执行完成：{_res.get('status')}（新增 {_res.get('added', 0)} /"
-                            f" 消失 {_res.get('removed', 0)}）"
+                            _t(
+                                f"执行完成：{_res.get('status')}（新增 {_res.get('added', 0)} / 消失 {_res.get('removed', 0)}）",
+                                f"Run finished: {_res.get('status')} ({_res.get('added', 0)} added / {_res.get('removed', 0)} removed)",
+                            )
                         )
                         st.rerun()
                 with _sb3:
@@ -158,8 +168,12 @@ def _page_projects() -> None:
                         st.rerun()
             if _sched:
                 st.caption(
-                    f"上次执行：{_sched['last_run'] or '—'} · 状态：{_sched['last_status'] or '—'}"
-                    f" · {'已启用' if _sched['enabled'] else '已暂停'}"
+                    _t(
+                        f"上次执行：{_sched['last_run'] or '—'} · 状态：{_sched['last_status'] or '—'}"
+                        f" · {'已启用' if _sched['enabled'] else '已暂停'}",
+                        f"Last run: {_sched['last_run'] or '—'} · status: {_sched['last_status'] or '—'}"
+                        f" · {'enabled' if _sched['enabled'] else 'paused'}",
+                    )
                 )
             else:
                 st.caption(
@@ -223,8 +237,12 @@ def _page_projects() -> None:
                     )
                     st.success(
                         _t("复核完成：", "Review done: ")
-                        + f"已确认 {_stats.get('已确认', 0)} · 存疑 {_stats.get('存疑', 0)} ·"
-                        f" 已驳回 {_stats.get('已驳回', 0)}"
+                        + _t("已确认", "Confirmed")
+                        + f" {_stats.get('已确认', 0)} · "
+                        + _t("存疑", "Uncertain")
+                        + f" {_stats.get('存疑', 0)} · "
+                        + _t("已驳回", "Refuted")
+                        + f" {_stats.get('已驳回', 0)}"
                     )
                     st.rerun()
             _rows = [
@@ -269,7 +287,7 @@ def _page_projects() -> None:
                             unsafe_allow_html=True,
                         )
                         if t["impact"]:
-                            st.caption(f"影响：{t['impact']}")
+                            st.caption(_t(f"影响：{t['impact']}", f"Impact: {t['impact']}"))
                     with _rc2:
                         _sc1, _sc2 = st.columns([1, 1])
                         with _sc1:
@@ -304,17 +322,20 @@ def _page_projects() -> None:
                     store.log_action(
                         st.session_state.get("user", ""), "更新威胁台账", f"{_sel}（{_n} 条）"
                     )
-                    st.success(f"已保存 {_n} 条变更。")
+                    st.success(_t(f"已保存 {_n} 条变更。", f"Saved {_n} change(s)."))
                     st.rerun()
             with _reg_c2:
                 if st.button(_t("推送到 Webhook", "Push to webhook"), key="ws_push_webhooks"):
                     _outcomes = _generation.push_webhooks(_sel, list_threats(project=_sel))
                     _ok = [o for o in _outcomes if o.get("ok")]
                     if _ok:
-                        st.success(f"已推送 {len(_ok)} 个 Webhook")
+                        st.success(_t(f"已推送 {len(_ok)} 个 Webhook", f"Pushed to {len(_ok)} webhook(s)"))
                     else:
                         st.warning(
-                            f"推送失败：{_outcomes[0].get('error') or _outcomes[0].get('status')}"
+                            _t(
+                                f"推送失败：{_outcomes[0].get('error') or _outcomes[0].get('status')}",
+                                f"Push failed: {_outcomes[0].get('error') or _outcomes[0].get('status')}",
+                            )
                         )
 
     with _tab_board:
@@ -326,13 +347,13 @@ def _page_projects() -> None:
         with _cc1:
             st.markdown(_t("#### STRIDE 分布", "#### STRIDE distribution"))
             if _by_type:
-                st.bar_chart({"数量": _by_type})
+                st.bar_chart({_t("数量", "Count"): _by_type})
             else:
                 st.caption(_t("暂无数据", "No data yet"))
         with _cc2:
             st.markdown(_t("#### 台账状态分布", "#### Status distribution"))
             if _by_status:
-                st.bar_chart({"数量": _by_status})
+                st.bar_chart({_t("数量", "Count"): _by_status})
             else:
                 st.caption(_t("暂无数据", "No data yet"))
         st.markdown(_t("#### 高风险 Top 10（按 DREAD 评分）", "#### Top 10 risks (by DREAD score)"))
@@ -342,7 +363,9 @@ def _page_projects() -> None:
         )[:10]
         if _risky:
             _lines = [
-                "| 风险分 | 类型 | 场景 | 状态 | 负责人 |",
+                "| " + _t("风险分", "Score") + " | " + _t("类型", "Type") + " | "
+                + _t("场景", "Scenario") + " | " + _t("状态", "Status") + " | "
+                + _t("负责人", "Owner") + " |",
                 "|---|---|---|---|---|",
             ]
             for t in _risky:

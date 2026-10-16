@@ -34,7 +34,7 @@ def build_guided_description_draft():
 
     def clean(value):
         stripped = value.strip()
-        return stripped if stripped else "暂未填写。"
+        return stripped if stripped else _t("暂未填写。", "Not provided yet.")
 
     lines = [
         "引导式应用描述草稿",
@@ -150,7 +150,10 @@ def render_guided_description_builder(*, wrap_in_expander=False):
 
         insert_mode = st.radio(
             _t("草稿应如何应用到描述中？", "How should the draft be applied to the description?"),
-            options=["替换当前描述", "追加到当前描述"],
+            options=["replace", "append"],
+            format_func=lambda mode: _t("替换当前描述", "Replace current description")
+            if mode == "replace"
+            else _t("追加到当前描述", "Append to current description"),
             key="guided_insert_mode",
             horizontal=True,
         )
@@ -186,8 +189,10 @@ def render_guided_description_builder(*, wrap_in_expander=False):
                         )
                         st.session_state.pop("guided_description_suggestions", None)
                         st.error(
-                            "草稿生成失败，改为根据你的回答显示结构化草稿。"
-                            f"（{exc!s}）"
+                            _t(
+                                f"草稿生成失败，改为根据你的回答显示结构化草稿。（{exc!s}）",
+                                f"Draft generation failed; showing a structured draft assembled from your answers. ({exc!s})",
+                            )
                         )
         with action_col2:
             if st.button(_t("应用引导草稿", "Apply guided draft")):
@@ -197,7 +202,7 @@ def render_guided_description_builder(*, wrap_in_expander=False):
                     st.session_state["guided_description_draft"] = draft
 
                 existing_description = st.session_state.get("app_input", "").strip()
-                if insert_mode == "替换当前描述" or not existing_description:
+                if insert_mode == "replace" or not existing_description:
                     st.session_state["app_input"] = draft
                     st.session_state["_sync_app_desc"] = True
                 elif draft not in existing_description:
@@ -298,11 +303,11 @@ def render_github_repo_input():
                         _t("GitHub 返回 403——通常是速率限制或令牌需要 SSO 授权。请稍候片刻，或为该组织授权令牌后重试。", "GitHub returned 403 — usually rate limiting or an SSO authorization prompt. Wait a moment, or authorize the token for the organization, then retry.")
                     )
                 else:
-                    st.error(f"GitHub API 错误：{e}")
+                    st.error(_t(f"GitHub API 错误：{e}", f"GitHub API error: {e}"))
             except ValueError as e:
                 st.error(str(e))
             except Exception as e:  # network errors, unexpected failures
-                st.error(f"无法分析该仓库：{e}")
+                st.error(_t(f"无法分析该仓库：{e}", f"Unable to analyse this repository: {e}"))
 
 
 def render_app_description():
@@ -701,13 +706,22 @@ def get_lm_studio_models(endpoint, api_key="not-needed"):
         return ["local-model"]
     except Exception as e:
         st.error(
-            f"""从 LM Studio Server 获取模型失败：{e}
+            _t(
+                f"""从 LM Studio Server 获取模型失败：{e}
 
 请检查：
 1. LM Studio 已正确配置并正在运行
 2. 已在 LM Studio 中加载模型
 3. 服务器运行在本地推理模式
-4. 如启用了鉴权，请确认 API Key 正确"""
+4. 如启用了鉴权，请确认 API Key 正确""",
+                f"""Failed to fetch models from the LM Studio server: {e}
+
+Check that:
+1. LM Studio is installed and running
+2. A model is loaded in LM Studio
+3. The server is running in local inference mode
+4. If authentication is enabled, the API key is correct""",
+            )
         )
         return ["local-model"]
 

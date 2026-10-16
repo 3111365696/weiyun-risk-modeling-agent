@@ -57,7 +57,7 @@ def render_status() -> None:
             _hours, _rest = divmod(int(_uptime.total_seconds()), 3600)
             st.markdown(
                 f"- {_t('产品版本', 'Product version')}：**{_backup.tool_version()}**\n"
-                f"- {_t('进程运行时长', 'Process uptime')}：**{_hours} 小时 {_rest // 60} 分钟**\n"
+                f"- {_t('进程运行时长', 'Process uptime')}：**{_hours} {_t('小时', 'h')} {_rest // 60} {_t('分钟', 'min')}**\n"
                 f"- Python：**{platform.python_version()}** · {platform.system()} {platform.machine()}\n"
                 f"- {_t('数据目录', 'Data directory')}：`{store.DATA_DIR}`\n"
                 f"- {_t('日志目录', 'Log directory')}：`{_logging.log_dir() or '—'}`"
