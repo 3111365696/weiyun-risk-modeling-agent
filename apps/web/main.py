@@ -1740,6 +1740,15 @@ groq_api_key = st.session_state.get("groq_api_key", "")
 deepseek_api_key = st.session_state.get("deepseek_api_key", "")
 
 
+def _usage_month_groups(limit: int = 8) -> list[dict]:
+    """本月按模型的用量（设置页与仪表盘共用）。"""
+    month_start = datetime.now().strftime("%Y-%m") + "-01 00:00:00"
+    summary = store.usage_summary(since=month_start)
+    rows = [{"key": key, **value} for key, value in summary["groups"]["model"].items()]
+    rows.sort(key=lambda r: -r["tokens"])
+    return rows[:limit]
+
+
 # ------------------ 系统配置 ------------------ #
 
 def render_settings() -> None:
@@ -1807,7 +1816,10 @@ def render_settings() -> None:
                         f"{_info.name} API Key",
                         type="password",
                         key=_session_key,
-                        help=f"你可以在以下位置找到 API Key：[{_info.name}]({_info.api_key_url})。",
+                        help=_t(
+                            f"你可以在以下位置找到 API Key：[{_info.name}]({_info.api_key_url})。",
+                            f"Find your API key at [{_info.name}]({_info.api_key_url}).",
+                        ),
                     )
                 _model_list = get_models_for_provider(_provider)
                 st.selectbox(
@@ -1841,10 +1853,16 @@ def render_settings() -> None:
                 bool(st.session_state.get(_skey, "")) if _skey else _prov == "LM Studio Server"
             )
             st.markdown(
-                f"- 提供商：**{_prov}**\n"
-                f"- 默认模型：**{_model}**\n"
-                f"- 大模型 API Key：**{'已配置' if _has_key else '未配置'}**\n"
-                f"- GitHub API Key：**{'已配置' if st.session_state.get('github_api_key') else '未配置'}**"
+                _t(
+                    f"- 提供商：**{_prov}**\n"
+                    f"- 默认模型：**{_model}**\n"
+                    f"- 大模型 API Key：**{'已配置' if _has_key else '未配置'}**\n"
+                    f"- GitHub API Key：**{'已配置' if st.session_state.get('github_api_key') else '未配置'}**",
+                    f"- Provider: **{_prov}**\n"
+                    f"- Default model: **{_model}**\n"
+                    f"- LLM API key: **{'configured' if _has_key else 'not set'}**\n"
+                    f"- GitHub API key: **{'configured' if st.session_state.get('github_api_key') else 'not set'}**",
+                )
             )
 
         with st.container(border=True, key="settings_github"):
@@ -1873,12 +1891,15 @@ def render_settings() -> None:
                 )
                 st.session_state["current_model_key"] = _model_key
             _token_limit = st.slider(
-                "GitHub 分析最大 token 上限",
+                _t("GitHub 分析最大 token 上限", "Max token budget for repo analysis"),
                 min_value=4000,
                 max_value=_max_tokens,
                 value=st.session_state["token_limit"],
                 step=1000,
-                help="设置 GitHub 仓库分析可用的最大 token 数，避免超出模型上下文窗口。",
+                help=_t(
+                    "设置 GitHub 仓库分析可用的最大 token 数，避免超出模型上下文窗口。",
+                    "Maximum tokens used for repository analysis; keeps requests inside the model context window.",
+                ),
             )
             st.session_state["token_limit"] = _token_limit
 
@@ -1900,9 +1921,17 @@ def render_settings() -> None:
                 st.warning(_t("已清除服务端配置（当前会话中的值仍保留）。", "Server-side configuration cleared (current session values remain)."))
         _saved_at = st.session_state.get("_config_saved_at") or config_saved_at()
         st.caption(
-            f"当前会话中的修改即时生效；上次保存到服务端：{_saved_at}。"
-            if _saved_at
-            else "当前会话中的修改即时生效；点击「保存配置到服务端」后重启仍生效。"
+
+                _t(
+                    f"当前会话中的修改即时生效；上次保存到服务端：{_saved_at}。",
+                    f"Changes apply immediately in this session; last saved to server: {_saved_at}.",
+                )
+                if _saved_at
+                else _t(
+                    "当前会话中的修改即时生效；点击「保存配置到服务端」后重启仍生效。",
+                    "Changes apply immediately in this session; click “Save configuration to server” to survive restarts.",
+                )
+
         )
 
         with st.container(border=True, key="settings_template"):
@@ -2054,8 +2083,10 @@ def render_settings() -> None:
                     st.markdown(
                         f"**{_k['name']}**"
                         + (f"（{' · '.join(_quota_bits)}）" if _quota_bits else "")
-                        + f"  \n<span class='sg-rep-meta'>创建 {_k['created_at']}"
-                        f" · 最近使用 {_k['last_used_at'] or '—'}</span>",
+                        + _t("  \n<span class='sg-rep-meta'>创建 ", "  \n<span class='sg-rep-meta'>Created ")
+                        + f"{_k['created_at']}"
+                        + _t(" · 最近使用 ", " · last used ")
+                        + f"{_k['last_used_at'] or '—'}</span>",
                         unsafe_allow_html=True,
                     )
                 with _kc2:
@@ -4257,15 +4288,6 @@ def _page_users() -> None:
             f"| {_row['ts']} | {_row['username']} | {_row['action']} | {_detail} |"
         )
     st.markdown("\n".join(_lines))
-
-
-def _usage_month_groups(limit: int = 8) -> list[dict]:
-    """本月按模型的用量（设置页与仪表盘共用）。"""
-    month_start = datetime.now().strftime("%Y-%m") + "-01 00:00:00"
-    summary = store.usage_summary(since=month_start)
-    rows = [{"key": key, **value} for key, value in summary["groups"]["model"].items()]
-    rows.sort(key=lambda r: -r["tokens"])
-    return rows[:limit]
 
 
 def _page_overview() -> None:
