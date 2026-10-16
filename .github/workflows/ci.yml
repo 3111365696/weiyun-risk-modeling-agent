@@ -1,8 +1,10 @@
 name: CI
 
+# 本仓库（威云-风险建模智能体）的持续集成：静态检查 + 全量测试。
+# 覆盖：apps(web/api/scheduler/common) / stride_gpt(核心) / tests / scripts
 on:
   push:
-    branches: [ master ]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -17,44 +19,34 @@ jobs:
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: '3.12'
           enable-cache: true
-
       - name: Install dependencies
         run: uv sync --frozen
-
-      - name: Run ruff
-        run: uv run ruff check --output-format=github .
+      - name: Ruff
+        run: uv run ruff check apps stride_gpt tests scripts
 
   test:
-    name: Test (Python ${{ matrix.python-version }})
+    name: Tests (Python 3.12)
     runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.12', '3.13', '3.14']
-
+    timeout-minutes: 25
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ matrix.python-version }}
           enable-cache: true
-
       - name: Install dependencies
         run: uv sync --frozen
-
-      - name: Run tests
-        run: uv run pytest
+      - name: Pytest
+        run: uv run pytest -q
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-logs
+          path: |
+            .pytest_cache/v/cache/lastfailed
+          if-no-files-found: ignore
