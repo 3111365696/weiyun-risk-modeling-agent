@@ -46,6 +46,9 @@ PERSIST_KEYS = [
     "project_name",
     "security_baseline",
     "scrub_enabled",
+    "report_brand",
+    "report_footer",
+    "ui_language",
     *sorted(SENSITIVE_KEYS),
 ]
 
@@ -208,6 +211,20 @@ def init_db() -> None:
                 enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT '',
                 last_used_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                interval_minutes INTEGER NOT NULL DEFAULT 1440,
+                notify_on_change INTEGER NOT NULL DEFAULT 1,
+                last_run TEXT NOT NULL DEFAULT '',
+                last_status TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT ''
             )
             """
         )
@@ -1046,3 +1063,88 @@ def list_audit(limit: int = 200, username: str | None = None) -> list[dict]:
     if username:
         result = [r for r in result if r["username"] == username]
     return result
+
+
+# ---------------------------------------------------------------------------
+# 定时分析计划
+# ---------------------------------------------------------------------------
+
+
+def add_schedule(project: str, interval_minutes: int = 1440, notify_on_change: bool = True) -> int:
+    init_db()
+    with _conn() as c:
+        existing = c.execute("SELECT id FROM schedules WHERE project = ?", (project,)).fetchone()
+        if existing:
+            c.execute(
+                "UPDATE schedules SET enabled = 1, interval_minutes = ?, notify_on_change = ?"
+                " WHERE id = ?",
+                (int(interval_minutes), int(bool(notify_on_change)), existing["id"]),
+            )
+            return int(existing["id"])
+        cur = c.execute(
+            "INSERT INTO schedules(project, enabled, interval_minutes, notify_on_change, created_at)"
+            " VALUES(?, 1, ?, ?, ?)",
+            (project, int(interval_minutes), int(bool(notify_on_change)), _now()),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def list_schedules() -> list[dict]:
+    init_db()
+    with _conn() as c:
+        rows = c.execute("SELECT * FROM schedules ORDER BY id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_schedule(schedule_id: int) -> dict | None:
+    init_db()
+    with _conn() as c:
+        row = c.execute("SELECT * FROM schedules WHERE id = ?", (schedule_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_schedule(schedule_id: int, **fields) -> None:
+    allowed = {"enabled", "interval_minutes", "notify_on_change", "last_run", "last_status"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return
+    init_db()
+    with _conn() as c:
+        sets = ", ".join(f"{k} = ?" for k in updates)
+        c.execute(f"UPDATE schedules SET {sets} WHERE id = ?", (*updates.values(), schedule_id))
+
+
+def delete_schedule(schedule_id: int) -> None:
+    init_db()
+    with _conn() as c:
+        c.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+
+
+def _parse_ts(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+
+
+def due_schedules(now: datetime | None = None) -> list[dict]:
+    """返回到期的启用计划（从未运行过的立即到期）。"""
+    now = now or datetime.now()
+    due = []
+    for row in list_schedules():
+        if not row["enabled"]:
+            continue
+        last = _parse_ts(row["last_run"])
+        if last is None or (now - last).total_seconds() >= max(1, int(row["interval_minutes"])) * 60:
+            due.append(row)
+    return due
+
+
+def text_webhook_payload(kind: str, title: str, text: str) -> dict:
+    """纯文本类 Webhook 推送体（飞书/企微/钉钉/通用）。"""
+    body = f"【{title}】\n{text}"
+    if kind == "feishu":
+        return {"msg_type": "text", "content": {"text": body}}
+    if kind in ("wecom", "dingtalk"):
+        return {"msgtype": "text", "text": {"content": body}}
+    return {"event": "notification", "title": title, "text": text}

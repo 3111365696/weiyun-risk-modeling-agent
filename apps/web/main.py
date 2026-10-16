@@ -42,8 +42,12 @@ from attack_tree import (
     get_attack_tree_lm_studio,
     get_attack_tree_mistral,
 )
+from common import exporters as _exporters
 from common import generation as _generation
+from common import i18n as _i18n
 from common import store
+
+_t = _i18n.t
 from common.store import (
     KIND_LABELS,
     PERSIST_KEYS,
@@ -216,6 +220,32 @@ _SENSITIVE_DATA_LABELS = {
     "None": "无",
 }
 _YES_NO_LABELS = {"Yes": "是", "No": "否"}
+_APP_TYPE_LABELS_EN = {
+    "Web application": "Web",
+    "Mobile application": "Mobile",
+    "Desktop application": "Desktop",
+    "Cloud application": "Cloud",
+    "IoT application": "IoT",
+    "Generative AI application": "Generative AI",
+    "Agentic AI application": "Agentic AI",
+    "Other": "Other",
+}
+_SENSITIVE_DATA_LABELS_EN = {
+    "Top Secret": "Top Secret",
+    "Secret": "Secret",
+    "Confidential": "Confidential",
+    "Restricted": "Restricted",
+    "Unclassified": "Unclassified",
+    "None": "None",
+}
+_YES_NO_LABELS_EN = {"Yes": "Yes", "No": "No"}
+_AUTH_LABELS_EN = {"SSO": "SSO", "MFA": "MFA", "OAUTH2": "OAuth2", "Basic": "Basic", "None": "None"}
+
+
+def _ui_label(zh_map: dict, en_map: dict, key: str) -> str:
+    """按语言选择下拉显示标签。"""
+    labels = en_map if _i18n.current_language() == "en" else zh_map
+    return labels.get(key, key)
 _AUTH_LABELS = {
     "SSO": "SSO",
     "MFA": "MFA",
@@ -359,13 +389,13 @@ def render_guided_description_builder(*, wrap_in_expander=False):
     ``wrap_in_expander=True`` to nest it in a collapsible expander instead.
     """
     container = (
-        st.expander("不知道怎么写应用描述？", expanded=False)
+        st.expander(_t("不知道怎么写应用描述？", "Need help writing your app description?"), expanded=False)
         if wrap_in_expander
         else st.container()
     )
     with container:
         st.caption(
-            "回答以下问题，然后用所选模型生成描述草稿，它还会提示值得补充的细节。"
+            _t("回答以下问题，然后用所选模型生成描述草稿，它还会提示值得补充的细节。", "Answer these prompts, then generate a draft description with the selected model. It will also suggest extra details worth adding.")
         )
 
         for field in GUIDED_DESCRIPTION_FIELDS:
@@ -378,7 +408,7 @@ def render_guided_description_builder(*, wrap_in_expander=False):
             )
 
         insert_mode = st.radio(
-            "草稿应如何应用到描述中？",
+            _t("草稿应如何应用到描述中？", "How should the draft be applied to the description?"),
             options=["替换当前描述", "追加到当前描述"],
             key="guided_insert_mode",
             horizontal=True,
@@ -386,7 +416,7 @@ def render_guided_description_builder(*, wrap_in_expander=False):
 
         action_col1, action_col2, action_col3 = st.columns([1, 1, 1])
         with action_col1:
-            if st.button("生成引导草稿"):
+            if st.button(_t("生成引导草稿", "Generate guided draft")):
                 config = resolve_active_llm_config(response_format="json")
                 answers = {
                     field["key"]: st.session_state.get(field["key"], "")
@@ -399,11 +429,11 @@ def render_guided_description_builder(*, wrap_in_expander=False):
                     )
                     st.session_state.pop("guided_description_suggestions", None)
                     st.info(
-                        "为所选提供商添加 API Key 后即可获得带建议的 AI 草稿。当前显示的是根据你的回答汇编的结构化草稿。"
+                        _t("为所选提供商添加 API Key 后即可获得带建议的 AI 草稿。当前显示的是根据你的回答汇编的结构化草稿。", "Add an API key for the selected provider to get an AI-generated draft with suggestions. Showing a structured draft assembled from your answers instead.")
                     )
                 else:
                     try:
-                        with st.spinner("正在生成草稿……"):
+                        with st.spinner(_t("正在生成草稿……", "Generating draft…")):
                             draft, suggestions = generate_guided_draft(
                                 config, app_type, answers
                             )
@@ -419,7 +449,7 @@ def render_guided_description_builder(*, wrap_in_expander=False):
                             f"（{exc!s}）"
                         )
         with action_col2:
-            if st.button("应用引导草稿"):
+            if st.button(_t("应用引导草稿", "Apply guided draft")):
                 draft = st.session_state.get("guided_description_draft", "").strip()
                 if not draft:
                     draft = build_guided_description_draft()
@@ -434,20 +464,20 @@ def render_guided_description_builder(*, wrap_in_expander=False):
                     st.session_state["_sync_app_desc"] = True
         with action_col3:
             st.button(
-                "清空引导答案",
+                _t("清空引导答案", "Clear guided answers"),
                 on_click=clear_guided_description_answers,
             )
 
         if st.session_state.get("guided_description_draft"):
-            st.markdown("##### 引导草稿预览")
+            st.markdown(_t("##### 引导草稿预览", "##### Guided draft preview"))
             st.code(st.session_state["guided_description_draft"], language="markdown")
             suggestions = st.session_state.get("guided_description_suggestions")
             if suggestions:
-                st.markdown("**建议补充的信息：**")
+                st.markdown(_t("**建议补充的信息：**", "**Suggested additional information:**"))
                 for suggestion in suggestions:
                     st.markdown(f"- {suggestion}")
                 st.caption(
-                    "建议仅供参考，不会自动加入你的描述。"
+                    _t("建议仅供参考，不会自动加入你的描述。", "Suggestions are guidance only; they are not added to your description automatically.")
                 )
 
 
@@ -460,10 +490,7 @@ def get_lm_studio_models(endpoint, api_key="not-needed"):
         return [model.id for model in models.data]
     except requests.exceptions.ConnectionError:
         st.error(
-            """无法连接 LM Studio Server，请确认：
-1. LM Studio 正在运行且本地服务器已启动
-2. 端点 URL 正确（默认：http://localhost:1234）
-3. 没有防火墙拦截连接"""
+            _t("无法连接 LM Studio Server，请确认：\n1. LM Studio 正在运行且本地服务器已启动\n2. 端点 URL 正确（默认：http://localhost:1234）\n3. 没有防火墙拦截连接", "Cannot connect to LM Studio Server. Please ensure:\n1. LM Studio is running and its local server is started\n2. The endpoint URL is correct (default: http://localhost:1234)\n3. No firewall is blocking the connection")
         )
         return ["local-model"]
     except Exception as e:
@@ -490,18 +517,18 @@ def render_github_repo_input():
     rerun so the sync happens in the same pass.
     """
     github_url = st.text_input(
-        label="输入 GitHub 仓库 URL（可选）",
+        label=_t("输入 GitHub 仓库 URL（可选）", "GitHub repository URL (optional)"),
         placeholder="https://github.com/owner/repo",
         key="github_url",
-        help="输入要分析的 GitHub 仓库 URL。",
+        help=_t("输入要分析的 GitHub 仓库 URL。", "Enter the URL of the GitHub repository you want to analyze."),
     )
 
     if github_url and github_url != st.session_state.get("last_analyzed_url", ""):
         if "github_api_key" not in st.session_state or not st.session_state["github_api_key"]:
-            st.warning("请先输入 GitHub API Key 再分析仓库。")
+            st.warning(_t("请先输入 GitHub API Key 再分析仓库。", "Please enter a GitHub API key before analyzing the repository."))
         else:
             try:
-                with st.spinner("正在分析 GitHub 仓库……"):
+                with st.spinner(_t("正在分析 GitHub 仓库……", "Analyzing GitHub repository…")):
                     system_description = analyze_github_repo(github_url)
                 st.session_state["github_analysis"] = system_description
                 st.session_state["last_analyzed_url"] = github_url
@@ -513,20 +540,15 @@ def render_github_repo_input():
                 status = getattr(e, "status", None)
                 if status == 404:
                     st.error(
-                        "仓库未找到（404）。请检查 URL 是否正确；注意**细粒度**个人访问令牌"
-                        "只能看到其选定范围内的仓库——范围之外的仓库即使是公开的也会返回 404。"
-                        "请确保该令牌有权访问此仓库（Contents: read-only），对于启用 SSO 的"
-                        "组织仓库，还需为该组织授权。"
+                        _t("仓库未找到（404）。请检查 URL 是否正确；注意**细粒度**个人访问令牌只能看到其选定范围内的仓库——范围之外的仓库即使是公开的也会返回 404。请确保该令牌有权访问此仓库（Contents: read-only），对于启用 SSO 的组织仓库，还需为该组织授权。", "Repository not found (404). Check the URL; note that a **fine-grained** personal access token only sees repositories in its selected set — repos outside that set return 404 even when public. Ensure the token can access this repository (Contents: read-only) and, for org repos behind SSO, that it is authorized for the org.")
                     )
                 elif status == 401:
                     st.error(
-                        "GitHub 拒绝该令牌（401）。个人访问令牌无效或已过期，"
-                        "请重新生成后重试。"
+                        _t("GitHub 拒绝该令牌（401）。个人访问令牌无效或已过期，请重新生成后重试。", "GitHub rejected the token (401). The personal access token is invalid or expired — generate a new one and retry.")
                     )
                 elif status == 403:
                     st.error(
-                        "GitHub 返回 403——通常是速率限制或令牌需要 SSO 授权。"
-                        "请稍候片刻，或为该组织授权令牌后重试。"
+                        _t("GitHub 返回 403——通常是速率限制或令牌需要 SSO 授权。请稍候片刻，或为该组织授权令牌后重试。", "GitHub returned 403 — usually rate limiting or an SSO authorization prompt. Wait a moment, or authorize the token for the organization, then retry.")
                     )
                 else:
                     st.error(f"GitHub API 错误：{e}")
@@ -549,11 +571,11 @@ def render_app_description():
         st.session_state["app_desc"] = st.session_state.get("app_input", "")
 
     input_text = st.text_area(
-        label="描述要建模的应用",
-        placeholder="输入应用详情……",
+        label=_t("描述要建模的应用", "Describe the application to be modelled"),
+        placeholder=_t("输入应用详情……", "Enter your application details…"),
         height=300,
         key="app_desc",
-        help="请详细描述该应用，包括用途、所用技术以及任何其他相关信息。",
+        help=_t("请详细描述该应用，包括用途、所用技术以及任何其他相关信息。", "Provide a detailed description of the application, including purpose, technologies used, and any other relevant information."),
     )
 
     st.session_state["app_input"] = input_text
@@ -666,7 +688,7 @@ def analyze_github_repo(repo_url):
             readme_content = base64.b64decode(readme_file.content).decode()
             readme_tokens = estimate_tokens(readme_content, token_estimation_model)
         except GithubException:
-            st.warning("仓库中未找到 README.md。")
+            st.warning(_t("仓库中未找到 README.md。", "No README.md found in the repository."))
 
     # If README is too large, truncate it
     if readme_tokens > analysis_token_limit * 0.7:
@@ -966,6 +988,9 @@ if not st.session_state.get("_config_loaded"):
     st.session_state["_config_loaded"] = True
     _generation.apply_policies()  # 企业安全基线 + 脱敏策略
 
+# 界面语言（配置持久化；每次 rerun 都从会话状态应用）
+_i18n.set_language(st.session_state.get("ui_language") or "zh")
+
 # 配置默认值（可在「系统配置」界面修改）
 if "model_provider" not in st.session_state:
     st.session_state["model_provider"] = "OpenAI API"
@@ -990,7 +1015,7 @@ internet_facing = st.session_state.get("internet_facing", "")
 authentication = st.session_state.get("authentication", [])
 
 st.set_page_config(
-    page_title="威云-风险建模智能体",
+    page_title=_t("威云-风险建模智能体", "Weiyun Risk Modeling Agent"),
     page_icon=":shield:",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1189,10 +1214,13 @@ _AUTH_PASSWORD = os.getenv("STRIDE_GPT_PASSWORD", "admin123")
 
 
 _ROLE_LABELS = {"admin": "系统管理员", "user": "普通用户"}
+_ROLE_LABELS_EN = {"admin": "Administrator", "user": "User"}
 
 
 def _role_display() -> str:
-    return _ROLE_LABELS.get(st.session_state.get("role", "user"), "普通用户")
+    role = st.session_state.get("role", "user")
+    labels = _ROLE_LABELS_EN if _i18n.current_language() == "en" else _ROLE_LABELS
+    return labels.get(role, role)
 
 
 def _is_admin() -> bool:
@@ -1443,20 +1471,16 @@ def render_login() -> None:
         )
     with right, st.container(border=True, key="login_card"):
             st.markdown(
-                """
-                <div class="sg-kicker">ACCESS CONTROL</div>
-                <div class="sg-card-title">登录</div>
-                <div class="sg-card-sub">请使用授权账号访问控制台</div>
-                """,
+                _t("<div class=\"sg-kicker\">ACCESS CONTROL</div>\n                <div class=\"sg-card-title\">登录</div>\n                <div class=\"sg-card-sub\">请使用授权账号访问控制台</div>", "<div class=\"sg-kicker\">ACCESS CONTROL</div>\n                <div class=\"sg-card-title\">Sign in</div>\n                <div class=\"sg-card-sub\">Use an authorized account to access the console</div>"),
                 unsafe_allow_html=True,
             )
             with st.form("login_form", border=False):
-                username = st.text_input("用户名", key="login_user", placeholder="请输入用户名")
+                username = st.text_input(_t("用户名", "Username"), key="login_user", placeholder=_t("请输入用户名", "Enter your username"))
                 password = st.text_input(
-                    "密码", type="password", key="login_password", placeholder="请输入密码"
+                    _t("密码", "Password"), type="password", key="login_password", placeholder=_t("请输入密码", "Enter your password")
                 )
                 submitted = st.form_submit_button(
-                    "登 录", use_container_width=True, type="primary"
+                    _t("登 录", "Sign in"), use_container_width=True, type="primary"
                 )
             if submitted:
                 _account = _authenticate(username, password)
@@ -1469,20 +1493,14 @@ def render_login() -> None:
                     st.rerun()
                 else:
                     store.log_action(username or "未知用户", "登录失败", "用户名或密码错误")
-                    st.error("用户名或密码错误，请重试")
+                    st.error(_t("用户名或密码错误，请重试", "Incorrect username or password, please retry"))
             st.markdown(
-                '<div class="sg-card-foot">仅限授权人员访问 · 登录行为将被记录</div>',
+                _t("<div class=\"sg-card-foot\">仅限授权人员访问 · 登录行为将被记录</div>", "<div class=\"sg-card-foot\">Authorized personnel only · Login activity is recorded</div>"),
                 unsafe_allow_html=True,
             )
     st.iframe(_AUTOFOCUS_JS, height=1)
     st.markdown(
-        """
-        <div class="sg-footbar">
-          <span>© 2026 威云安全 · 风险建模智能体</span>
-          <span>STRIDE · OWASP LLM/ASI · MITRE ATT&amp;CK/ATLAS</span>
-          <span>TLS 加密传输 · 会话隔离</span>
-        </div>
-        """,
+        _t("<div class=\"sg-footbar\">\n          <span>© 2026 威云安全 · 风险建模智能体</span>\n          <span>STRIDE · OWASP LLM/ASI · MITRE ATT&amp;CK/ATLAS</span>\n          <span>TLS 加密传输 · 会话隔离</span>\n        </div>", "<div class=\"sg-footbar\">\n          <span>© 2026 Weiyun Security · Risk Modeling Agent</span>\n          <span>STRIDE · OWASP LLM/ASI · MITRE ATT&amp;CK/ATLAS</span>\n          <span>TLS encrypted · Session isolation</span>\n        </div>"),
         unsafe_allow_html=True,
     )
 
@@ -1495,7 +1513,7 @@ def _do_logout() -> None:
     导致清 cookie 的代码永远不会执行。
     """
     _logout_user = st.session_state.get("user", "")
-    store.log_action(_logout_user, "退出登录")
+    store.log_action(_logout_user, _t("退出登录", "Sign out"))
     if _logout_user:
         store.bump_session_epoch(_logout_user)  # 旧 cookie 立即失效
     for key in (
@@ -1514,7 +1532,7 @@ def _do_logout() -> None:
     st.rerun()
 
 
-@st.dialog("退出系统", icon=":material/logout:")
+@st.dialog(_t("退出系统", "Sign out"), icon=":material/logout:")
 def _logout_dialog() -> None:
     """退出系统确认弹窗。"""
     _user = st.session_state.get("user", "")
@@ -1523,13 +1541,13 @@ def _logout_dialog() -> None:
     st.markdown(f"当前用户：**{html.escape(_user)}** · {html.escape(_role)}")
     if _at:
         st.caption(f"本次登录时间：{_at}")
-    st.markdown("确认要退出系统吗？未保存的表单内容将丢失。")
+    st.markdown(_t("确认要退出系统吗？未保存的表单内容将丢失。", "Sign out? Unsaved form content will be lost."))
     _c1, _c2 = st.columns(2)
     with _c1:
-        if st.button("确认退出", type="primary", use_container_width=True, key="logout_confirm_yes"):
+        if st.button(_t("确认退出", "Sign out"), type="primary", use_container_width=True, key="logout_confirm_yes"):
             _do_logout()
     with _c2:
-        if st.button("取消", use_container_width=True, key="logout_confirm_no"):
+        if st.button(_t("取消", "Cancel"), use_container_width=True, key="logout_confirm_no"):
             st.session_state.pop("confirm_logout", None)
             st.rerun()
 
@@ -1625,48 +1643,58 @@ def on_model_selection_change():
 # ------------------ Sidebar ------------------ #
 
 st.sidebar.markdown(
-    """
-    <div class="sg-brand">
-      <div class="sg-brand-mark">威云</div>
-      <div class="sg-brand-name">风险建模智能体</div>
-    </div>
-    """,
+    _t("<div class=\"sg-brand\">\n      <div class=\"sg-brand-mark\">威云</div>\n      <div class=\"sg-brand-name\">风险建模智能体</div>\n    </div>", "<div class=\"sg-brand\">\n      <div class=\"sg-brand-mark\">WEIYUN</div>\n      <div class=\"sg-brand-name\">RISK MODELING AGENT</div>\n    </div>"),
     unsafe_allow_html=True,
 )
-st.sidebar.caption(f"当前用户：{st.session_state.get('user', '')} · {_role_display()}")
-if st.sidebar.button("退出登录", key="logout", use_container_width=True):
+st.sidebar.caption(
+    f"{_t('当前用户：', 'Signed in as: ')}{st.session_state.get('user', '')} · {_role_display()}"
+)
+if st.sidebar.button(_t("退出登录", "Sign out"), key="logout", use_container_width=True):
     st.session_state["confirm_logout"] = True
 
+# 界面语言
+with st.sidebar:
+    st.selectbox(
+        "界面语言 / Language",
+        options=list(_i18n.LANGUAGES),
+        format_func=lambda key: _i18n.LANGUAGES[key],
+        key="ui_language",
+        on_change=lambda: save_config(
+            {**{k: st.session_state.get(k) for k in PERSIST_KEYS},
+             "ui_language": st.session_state.get("ui_language")}
+        ),
+    )
+
 # 使用说明（简要）
-st.sidebar.header("使用说明")
+st.sidebar.header(_t("使用说明", "Getting started"))
 
 with st.sidebar:
     st.markdown(
-        "1. 在 **系统配置** 中填写模型 API Key 并选择模型\n"
-        "2. 描述应用，或上传架构图 / 关联 GitHub 仓库\n"
-        "3. 生成威胁模型、攻击树、数据流图、缓解措施等"
+        _t("1. 在 **系统配置** 中填写模型 API Key 并选择模型\n2. 描述应用，或上传架构图 / 关联 GitHub 仓库\n3. 生成威胁模型、攻击树、数据流图、缓解措施等", "1. Set the model API key and model in **System settings**\n2. Describe the app, or upload a diagram / link a GitHub repo\n3. Generate threat models, attack trees, DFDs, mitigations and more")
     )
-    st.caption(f"当前模型：{st.session_state.get('selected_model', '-')}")
+    st.caption(
+        f"{_t('当前模型：', 'Current model: ')}{st.session_state.get('selected_model', '-')}"
+    )
     if _is_admin() and st.button(
-        "打开系统配置", key="sidebar_settings", use_container_width=True
+        _t("打开系统配置", "Open system settings"), key="sidebar_settings", use_container_width=True
     ):
         st.session_state["view"] = "settings"
         st.rerun()
     st.divider()
 
     # Add "About" section to the sidebar
-    st.header("关于")
+    st.header(_t("关于", "About"))
 
     st.markdown(
-        "欢迎使用威云-风险建模智能体——一款帮助团队为应用生成更好威胁模型的 AI 工具。"
+        _t("欢迎使用威云-风险建模智能体——一款帮助团队为应用生成更好威胁模型的 AI 工具。", "Welcome to Weiyun Risk Modeling Agent — an AI tool that helps teams produce better threat models for their applications.")
     )
     st.markdown(
-        "威胁建模是软件开发生命周期中的关键活动，但常被忽视或执行不力。本系统利用大语言模型（LLM）的能力，根据你提供的信息为应用生成威胁列表、攻击树和/或缓解控制措施，帮助团队产出更全面的威胁模型。"
+        _t("威胁建模是软件开发生命周期中的关键活动，但常被忽视或执行不力。本系统利用大语言模型（LLM）的能力，根据你提供的信息为应用生成威胁列表、攻击树和/或缓解控制措施，帮助团队产出更全面的威胁模型。", "Threat modeling is a key activity in the software development lifecycle, but it is often overlooked or poorly executed. This system leverages large language models to generate threat lists, attack trees and/or mitigating controls from the details you provide, helping teams produce more comprehensive threat models.")
     )
-    st.markdown("作者：[Matt Adams](https://www.linkedin.com/in/matthewrwadams/)。")
+    st.markdown(_t("作者：[Matt Adams](https://www.linkedin.com/in/matthewrwadams/)。", "Created by [Matt Adams](https://www.linkedin.com/in/matthewrwadams/)."))
     # Add "Star on GitHub" link to the sidebar
     st.markdown(
-        "GitHub 加星：[![Star on GitHub](https://img.shields.io/github/stars/mrwadams/stride-gpt?style=social)](https://github.com/mrwadams/stride-gpt)"
+        _t("GitHub 加星：[![Star on GitHub](https://img.shields.io/github/stars/mrwadams/stride-gpt?style=social)](https://github.com/mrwadams/stride-gpt)", "Star on GitHub: [![Star on GitHub](https://img.shields.io/github/stars/mrwadams/stride-gpt?style=social)](https://github.com/mrwadams/stride-gpt)")
     )
 
     # Donate button - smaller version
@@ -1687,63 +1715,36 @@ with st.sidebar:
 
 
 # Add "Example Application Description" section to the sidebar
-st.sidebar.header("示例应用描述")
+st.sidebar.header(_t("示例应用描述", "Example application description"))
 
 with st.sidebar:
-    st.markdown("以下是一个示例应用描述，可用于快速体验本系统：")
+    st.markdown(_t("以下是一个示例应用描述，可用于快速体验本系统：", "Below is an example application description you can use to try the system:"))
     st.markdown(
-        "> 一个允许用户创建、存储和分享个人笔记的 Web 应用。应用前端使用 React 框架，后端为 Node.js，数据库为 MongoDB。用户可以通过 Google 或 Facebook 的 OAuth2 注册并登录。笔记在静态存储时加密，只有创建者本人可以访问。应用还支持多用户实时协作编辑笔记。"
+        _t("> 一个允许用户创建、存储和分享个人笔记的 Web 应用。应用前端使用 React 框架，后端为 Node.js，数据库为 MongoDB。用户可以通过 Google 或 Facebook 的 OAuth2 注册并登录。笔记在静态存储时加密，只有创建者本人可以访问。应用还支持多用户实时协作编辑笔记。", "> A web application that lets users create, store, and share personal notes. It uses a React frontend, a Node.js backend, and MongoDB. Users sign up and log in via OAuth2 with Google or Facebook. Notes are encrypted at rest and only accessible to their creator. The app also supports real-time collaborative editing.")
     )
     st.markdown("""---""")
 
 # Add "FAQs" section to the sidebar
-st.sidebar.header("常见问题")
+st.sidebar.header(_t("常见问题", "FAQ"))
 
 with st.sidebar:
     st.markdown(
-        """
-    ### **什么是 STRIDE？**
-    STRIDE 是一种威胁建模方法，用于识别和归类软件应用中的潜在安全风险。它代表 **S**poofing（仿冒）、**T**ampering（篡改）、**R**epudiation（抵赖）、**I**nformation Disclosure（信息泄露）、**D**enial of Service（拒绝服务）和 **E**levation of Privilege（权限提升）。
-    """
+        _t("### **什么是 STRIDE？**\n    STRIDE 是一种威胁建模方法，用于识别和归类软件应用中的潜在安全风险。它代表 **S**poofing（仿冒）、**T**ampering（篡改）、**R**epudiation（抵赖）、**I**nformation Disclosure（信息泄露）、**D**enial of Service（拒绝服务）和 **E**levation of Privilege（权限提升）。", "### **What is STRIDE?**\n    STRIDE is a threat modeling methodology for identifying and categorizing security risks. It stands for **S**poofing, **T**ampering, **R**epudiation, **I**nformation Disclosure, **D**enial of Service, and **E**levation of Privilege.")
     )
     st.markdown(
-        """
-    ### **威云-风险建模智能体如何工作？**
-    输入应用描述及其他相关信息后，工具会调用多家提供商（OpenAI、Anthropic、Google、Mistral、LM Studio 和 Groq）的先进 AI 模型为你生成威胁模型。所选模型会分析应用描述与细节，生成潜在威胁列表，并按 STRIDE 方法对每个威胁分类。
-    """
+        _t("### **威云-风险建模智能体如何工作？**\n    输入应用描述及其他相关信息后，工具会调用多家提供商（OpenAI、Anthropic、Google、Mistral、LM Studio 和 Groq）的先进 AI 模型为你生成威胁模型。所选模型会分析应用描述与细节，生成潜在威胁列表，并按 STRIDE 方法对每个威胁分类。", "### **How does it work?**\n    Given an application description and related details, the system calls advanced models from multiple providers (OpenAI, Anthropic, Google, Mistral, LM Studio, Groq) to produce a threat model. The selected model analyzes the description, lists potential threats, and categorizes each by STRIDE.")
     )
     st.markdown(
-        """
-    ### **你们会存储我提供的应用信息吗？**
-    不会。本系统不存储你的应用描述或其他细节，所有输入的数据会在你关闭浏览器标签页后删除。
-    """
+        _t("### **你们会存储我提供的应用信息吗？**\n    不会。本系统不存储你的应用描述或其他细节，所有输入的数据会在你关闭浏览器标签页后删除。", "### **Do you store the application details?**\n    No. Reports are archived locally by the administrator, but descriptions are not sent anywhere except the configured model provider.")
     )
     st.markdown(
-        """
-    ### **为什么生成威胁模型需要那么久？**
-    生成时间受几个因素影响：
-
-    **API 速率限制：** 免费 API Key 有严格的速率限制，使用付费 API Key 会更快。
-
-    **推理模型：** 如果选择 GPT-5 系列模型，它们会先“思考”再回答，因此耗时更长，但分析更充分。
-
-    **更快出结果：** 可选择更小/更快的模型，例如：
-    - Gemini Flash 代替 Gemini Pro
-    - GPT-5-nano 代替 GPT-5.2
-    - Claude Haiku 代替 Claude Sonnet
-    """
+        _t("### **为什么生成威胁模型需要那么久？**\n    生成时间受几个因素影响：\n\n    **API 速率限制：** 免费 API Key 有严格的速率限制，使用付费 API Key 会更快。\n\n    **推理模型：** 如果选择 GPT-5 系列模型，它们会先“思考”再回答，因此耗时更长，但分析更充分。\n\n    **更快出结果：** 可选择更小/更快的模型，例如：\n    - Gemini Flash 代替 Gemini Pro\n    - GPT-5-nano 代替 GPT-5.2\n    - Claude Haiku 代替 Claude Sonnet", "### **Why does generation take so long?**\n    Several factors affect timing:\n\n    **API rate limits:** free API keys are strictly limited; paid keys are faster.\n\n    **Reasoning models:** GPT-5 series models think before answering, which takes longer but yields deeper analysis.\n\n    **For faster results** choose smaller models:\n    - Gemini Flash instead of Gemini Pro\n    - GPT-5-nano instead of GPT-5.2\n    - Claude Haiku instead of Claude Sonnet")
     )
     st.markdown(
-        """
-    ### **威胁模型是 100% 准确的吗？**
-    不是。STRIDE GPT 使用来自多家 AI 提供商的大语言模型（LLM）生成输出。这些模型虽然强大，但有时也会出错，并且容易产生“幻觉”（生成不相关或不准确的内容）。请仅将输出作为识别和应对应用潜在安全风险的起点。
-    """
+        _t("### **威胁模型是 100% 准确的吗？**\n    不是。STRIDE GPT 使用来自多家 AI 提供商的大语言模型（LLM）生成输出。这些模型虽然强大，但有时也会出错，并且容易产生“幻觉”（生成不相关或不准确的内容）。请仅将输出作为识别和应对应用潜在安全风险的起点。", "### **Are threat models 100% accurate?**\n    No. Large language models are powerful but can make mistakes and hallucinate. Treat the output as a starting point for identifying and addressing potential security risks.")
     )
     st.markdown(
-        """
-    ### **如何提高威胁模型的准确性？**
-    提供详细的应用描述，并正确选择应用类型、认证方式及其他相关信息，可以提高准确性。你提供的信息越多，威胁模型就越准确。
-    """
+        _t("### **如何提高威胁模型的准确性？**\n    提供详细的应用描述，并正确选择应用类型、认证方式及其他相关信息，可以提高准确性。你提供的信息越多，威胁模型就越准确。", "### **How can I improve accuracy?**\n    Provide a detailed application description and select the correct application type, authentication methods, and other details. The more context you provide, the better the threat model.")
     )
 
 
@@ -1769,64 +1770,58 @@ deepseek_api_key = st.session_state.get("deepseek_api_key", "")
 def render_settings() -> None:
     """独立配置界面：模型服务、GitHub 集成、分析参数（仅管理员）。"""
     if not _is_admin():
-        st.error("需要管理员权限才能访问系统配置。")
+        st.error(_t("需要管理员权限才能访问系统配置。", "Administrator privileges are required to access system settings."))
         return
     st.markdown(
-        """
-        <div class="sg-settings-head">
-          <div class="sg-kicker">SYSTEM CONFIGURATION</div>
-          <div class="sg-settings-title">系统配置</div>
-          <div class="sg-settings-sub">模型服务、GitHub 集成与分析参数，修改后即时生效。</div>
-        </div>
-        """,
+        _t("<div class=\"sg-settings-head\">\n          <div class=\"sg-kicker\">SYSTEM CONFIGURATION</div>\n          <div class=\"sg-settings-title\">系统配置</div>\n          <div class=\"sg-settings-sub\">模型服务、GitHub 集成与分析参数，修改后即时生效。</div>\n        </div>", "<div class=\"sg-settings-head\">\n          <div class=\"sg-kicker\">SYSTEM CONFIGURATION</div>\n          <div class=\"sg-settings-title\">System settings</div>\n          <div class=\"sg-settings-sub\">Model service, GitHub integration and analysis parameters — changes take effect immediately.</div>\n        </div>"),
         unsafe_allow_html=True,
     )
 
     _cfg_left, _cfg_right = st.columns([1.15, 1], gap="large")
 
     with _cfg_left, st.container(border=True, key="settings_model"):
-            st.markdown("#### 模型服务")
-            st.caption("配置大模型提供商、API Key 与默认模型。API Key 仅保存在当前浏览器会话中。")
+            st.markdown(_t("#### 模型服务", "#### Model service"))
+            st.caption(_t("配置大模型提供商、API Key 与默认模型。API Key 仅保存在当前浏览器会话中。", "Configure the model provider, API key, and default model. API keys are kept in the current browser session only."))
 
             _provider_keys = [
                 p.provider_key for p in _PROVIDERS.values() if p.provider_key != "OpenRouter API"
             ]
             _provider = st.selectbox(
-                "模型提供商",
+                _t("模型提供商", "Model provider"),
                 _provider_keys,
                 key="model_provider",
                 on_change=on_model_provider_change,
-                help="选择要使用的模型提供商，这将决定可选的模型列表。",
+                help=_t("选择要使用的模型提供商，这将决定可选的模型列表。", "Choose the model provider; this determines the available models."),
             )
 
             if _provider == "LM Studio Server":
                 _provider_info = _PROVIDERS["LM Studio"]
                 st.markdown(_provider_info.setup_instructions)
                 _endpoint = st.text_input(
-                    "LM Studio Server 端点",
+                    _t("LM Studio Server 端点", "LM Studio Server endpoint"),
                     key="lm_studio_endpoint",
-                    help="你的 LM Studio Server 实例 URL。本地安装默认是 http://localhost:1234。",
+                    help=_t("你的 LM Studio Server 实例 URL。本地安装默认是 http://localhost:1234。", "URL of your LM Studio Server instance. Local installs default to http://localhost:1234."),
                 )
                 st.text_input(
-                    "LM Studio API Key（可选）",
+                    _t("LM Studio API Key（可选）", "LM Studio API key (optional)"),
                     type="password",
                     key="lm_studio_api_key",
-                    help="如果服务器不需要鉴权，请留空。",
+                    help=_t("如果服务器不需要鉴权，请留空。", "Leave empty if your server does not require authentication."),
                 )
                 _available = ["local-model"]
                 if _endpoint:
                     if not _endpoint.startswith(("http://", "https://")):
-                        st.error("端点 URL 必须以 http:// 或 https:// 开头")
+                        st.error(_t("端点 URL 必须以 http:// 或 https:// 开头", "Endpoint URL must start with http:// or https://"))
                     else:
                         _available = get_lm_studio_models(
                             _endpoint, st.session_state.get("lm_studio_api_key", "")
                         )
                 st.selectbox(
-                    "默认模型",
+                    _t("默认模型", "Default model"),
                     _available,
                     key="selected_model",
                     on_change=on_model_selection_change,
-                    help="从本地 LM Studio Server 中选择模型。",
+                    help=_t("从本地 LM Studio Server 中选择模型。", "Select a model from your local LM Studio Server."),
                 )
             else:
                 _info = next(p for p in _PROVIDERS.values() if p.provider_key == _provider)
@@ -1841,7 +1836,7 @@ def render_settings() -> None:
                     )
                 _model_list = get_models_for_provider(_provider)
                 st.selectbox(
-                    "默认模型",
+                    _t("默认模型", "Default model"),
                     [m.model_id for m in _model_list],
                     key="selected_model",
                     on_change=on_model_selection_change,
@@ -1853,17 +1848,17 @@ def render_settings() -> None:
                     _provider, st.session_state.get("selected_model", "")
                 ):
                     st.checkbox(
-                        "启用扩展思考",
+                        _t("启用扩展思考", "Enable extended thinking"),
                         value=st.session_state.get("use_thinking", False),
                         key="use_thinking",
-                        help="扩展思考为 Claude 提供更强的复杂任务推理能力，但可能增加响应时间和 token 消耗。",
+                        help=_t("扩展思考为 Claude 提供更强的复杂任务推理能力，但可能增加响应时间和 token 消耗。", "Extended thinking gives Claude stronger reasoning for complex tasks, but may increase response time and token usage."),
                     )
                 elif st.session_state.get("use_thinking"):
                     st.session_state["use_thinking"] = False
 
     with _cfg_right:
         with st.container(border=True, key="settings_status"):
-            st.markdown("#### 当前配置")
+            st.markdown(_t("#### 当前配置", "#### Current configuration"))
             _prov = st.session_state.get("model_provider", "OpenAI API")
             _model = st.session_state.get("selected_model", "-")
             _skey = PROVIDER_API_KEY_STATE.get(_prov, "")
@@ -1878,17 +1873,17 @@ def render_settings() -> None:
             )
 
         with st.container(border=True, key="settings_github"):
-            st.markdown("#### GitHub 集成")
-            st.caption("可选。配置后可直接分析 GitHub 仓库；细粒度令牌需具备 Contents: read-only 权限。")
+            st.markdown(_t("#### GitHub 集成", "#### GitHub integration"))
+            st.caption(_t("可选。配置后可直接分析 GitHub 仓库；细粒度令牌需具备 Contents: read-only 权限。", "Optional. Enables GitHub repository analysis; fine-grained tokens need Contents: read-only."))
             st.text_input(
-                "GitHub API Key（可选）",
+                _t("GitHub API Key（可选）", "GitHub API key (optional)"),
                 type="password",
                 key="github_api_key",
-                help="在 GitHub 账户设置 Developer settings > Personal access tokens 中创建。",
+                help=_t("在 GitHub 账户设置 Developer settings > Personal access tokens 中创建。", "Create one under GitHub account settings → Developer settings → Personal access tokens."),
             )
 
         with st.container(border=True, key="settings_advanced"):
-            st.markdown("#### 分析参数")
+            st.markdown(_t("#### 分析参数", "#### Analysis parameters"))
             _cur_provider = st.session_state.get("model_provider", "OpenAI API")
             _cur_model = st.session_state.get("selected_model", "")
             _model_key = f"{_cur_provider}:{_cur_model}"
@@ -1915,19 +1910,19 @@ def render_settings() -> None:
         _save_col, _clear_col = st.columns(2)
         with _save_col:
             if st.button(
-                "保存配置到服务端", key="save_server_config", type="primary", use_container_width=True
+                _t("保存配置到服务端", "Save configuration to server"), key="save_server_config", type="primary", use_container_width=True
             ):
                 _saved_at = save_config({k: st.session_state.get(k) for k in PERSIST_KEYS})
                 st.session_state["_config_saved_at"] = _saved_at
                 _generation.apply_policies()
                 store.log_action(st.session_state.get("user", ""), "保存配置")
-                st.success("配置已加密保存，重启服务后仍然生效。")
+                st.success(_t("配置已加密保存，重启服务后仍然生效。", "Configuration saved (encrypted); it survives restarts."))
         with _clear_col:
-            if st.button("清除已保存配置", key="clear_server_config", use_container_width=True):
+            if st.button(_t("清除已保存配置", "Clear saved configuration"), key="clear_server_config", use_container_width=True):
                 clear_config()
                 st.session_state["_config_saved_at"] = None
                 store.log_action(st.session_state.get("user", ""), "清除配置")
-                st.warning("已清除服务端配置（当前会话中的值仍保留）。")
+                st.warning(_t("已清除服务端配置（当前会话中的值仍保留）。", "Server-side configuration cleared (current session values remain)."))
         _saved_at = st.session_state.get("_config_saved_at") or config_saved_at()
         st.caption(
             f"当前会话中的修改即时生效；上次保存到服务端：{_saved_at}。"
@@ -1935,44 +1930,60 @@ def render_settings() -> None:
             else "当前会话中的修改即时生效；点击「保存配置到服务端」后重启仍生效。"
         )
 
+        with st.container(border=True, key="settings_template"):
+            st.markdown(_t("#### 报告模板", "#### Report template"))
+            st.caption(_t("Word / PDF 报告的抬头与页脚信息（保存配置后生效）。", "Header and footer text for Word / PDF reports (takes effect after saving)."))
+            _tm1, _tm2 = st.columns(2)
+            with _tm1:
+                st.text_input(
+                    _t("报告抬头（品牌）", "Report header (brand)"),
+                    key="report_brand",
+                    placeholder=_t("威云-风险建模智能体", "Weiyun Risk Modeling Agent"),
+                )
+            with _tm2:
+                st.text_input(
+                    _t("页脚（保密标识）", "Footer (confidentiality mark)"),
+                    key="report_footer",
+                    placeholder=_t("内部资料 · 注意保密", "Internal use only · Confidential"),
+                )
+
         with st.container(border=True, key="settings_policy"):
-            st.markdown("#### 安全策略")
-            st.caption("企业安全基线会注入所有生成请求；脱敏在发送前替换密钥/令牌等敏感串。")
+            st.markdown(_t("#### 安全策略", "#### Security policy"))
+            st.caption(_t("企业安全基线会注入所有生成请求；脱敏在发送前替换密钥/令牌等敏感串。", "The enterprise baseline is injected into every request; scrubbing replaces secrets before sending."))
             st.text_area(
-                "企业安全基线 / 自定义要求",
+                _t("企业安全基线 / 自定义要求", "Enterprise security baseline / custom requirements"),
                 key="security_baseline",
                 height=120,
                 placeholder=(
-                    "例如：\n- 必须符合等保 2.0 三级要求\n"
-                    "- 统一使用公司 SSO（OIDC）与集中审计\n- 数据出网需经网关审批"
+                    _t("例如：\n- 必须符合等保 2.0 三级要求\n- 统一使用公司 SSO（OIDC）与集中审计\n- 数据出网需经网关审批", "e.g.\n- Must comply with internal security baselines\n- Use company SSO (OIDC) and centralized audit\n- Data egress requires gateway approval")
                 ),
-                help="保存配置后生效，将作为额外的系统指令附加到每次模型调用。",
+                help=_t("保存配置后生效，将作为额外的系统指令附加到每次模型调用。", "Takes effect after saving; appended as an extra system instruction to every model call."),
             )
             st.checkbox(
-                "发送前对密钥 / 令牌做脱敏",
+                _t("发送前对密钥 / 令牌做脱敏", "Scrub secrets/tokens before sending"),
                 key="scrub_enabled",
                 value=bool(st.session_state.get("scrub_enabled", True)),
-                help="识别 OpenAI/Anthropic/GitHub/AWS/JWT/私钥等模式并替换为 [已脱敏:...]。",
+                help=_t("识别 OpenAI/Anthropic/GitHub/AWS/JWT/私钥等模式并替换为 [已脱敏:...]。", "Detects OpenAI/Anthropic/GitHub/AWS/JWT/private-key patterns and replaces them with [redacted:…]."),
             )
 
         with st.container(border=True, key="settings_api"):
-            st.markdown("#### API 访问")
-            st.caption("供 REST API（apps/api）与 CI 调用；密钥仅在创建时显示一次。")
+            st.markdown(_t("#### API 访问", "#### API access"))
+            st.caption(_t("供 REST API（apps/api）与 CI 调用；密钥仅在创建时显示一次。", "For the REST API (apps/api) and CI; the key is shown only once."))
             _new_key_name = st.text_input(
-                "新密钥名称", key="api_key_name", placeholder="如：CI 流水线"
+                _t("新密钥名称", "New key name"), key="api_key_name", placeholder=_t("如：CI 流水线", "e.g. CI pipeline")
             )
-            if st.button("创建 API Key", key="create_api_key", use_container_width=True):
+            if st.button(_t("创建 API Key", "Create API key"), key="create_api_key", use_container_width=True):
                 if not (_new_key_name or "").strip():
-                    st.warning("请先填写密钥名称")
+                    st.warning(_t("请先填写密钥名称", "Enter a key name first"))
                 else:
                     st.session_state["_new_api_key"] = store.create_api_key(_new_key_name.strip())
                     store.log_action(
-                        st.session_state.get("user", ""), "创建 API Key", _new_key_name.strip()
+                        st.session_state.get("user", ""), _t("创建 API Key", "Create API key"), _new_key_name.strip()
                     )
-                    st.success("已创建，请立即复制保存（只显示一次）")
+                    st.success(_t("已创建，请立即复制保存（只显示一次）", "Created — copy and store it now (shown only once)"))
             if st.session_state.get("_new_api_key"):
                 st.code(st.session_state["_new_api_key"], language="text")
-                st.caption("刷新页面后不再显示。")
+                st.caption(_t("刷新页面后不再显示。", "It will not be shown again after refresh."))
             _keys = store.list_api_keys()
             for _k in _keys:
                 _kc1, _kc2 = st.columns([4, 1], vertical_alignment="center")
@@ -1983,37 +1994,36 @@ def render_settings() -> None:
                         unsafe_allow_html=True,
                     )
                 with _kc2:
-                    if st.button("吊销", key=f"revoke_key_{_k['id']}", use_container_width=True):
+                    if st.button(_t("吊销", "Revoke"), key=f"revoke_key_{_k['id']}", use_container_width=True):
                         store.revoke_api_key(_k["id"])
                         store.log_action(st.session_state.get("user", ""), "吊销 API Key", _k["name"])
                         st.rerun()
             if not _keys:
-                st.caption("暂无 API Key。")
-            st.caption("接口地址示例：`http://<服务器>:8000/api/v1/threat-model`（启动与示例见 docs/api.md）")
+                st.caption(_t("暂无 API Key。", "No API keys yet."))
+            st.caption(_t("接口地址示例：`http://<服务器>:8000/api/v1/threat-model`（启动与示例见 docs/api.md）", "Endpoint example: `http://<server>:8000/api/v1/threat-model` (see docs/api.md)"))
 
         with st.container(border=True, key="settings_webhooks"):
-            st.markdown("#### 工单 / 通知集成")
+            st.markdown(_t("#### 工单 / 通知集成", "#### Ticketing / notification integrations"))
             st.caption(
-                "威胁台账可推送到飞书 / 企业微信 / 钉钉 / 通用 Webhook"
-                "（Jira、禅道等可经通用 Webhook 中转）。"
+                _t("威胁台账可推送到飞书 / 企业微信 / 钉钉 / 通用 Webhook（Jira、禅道等可经通用 Webhook 中转）。", "Push the threat register to Feishu / WeCom / DingTalk / generic webhooks (Jira, ZenTao, etc. via generic webhook).")
             )
             _wh1, _wh2, _wh3 = st.columns([2, 3, 1.4])
             with _wh1:
-                _wh_name = st.text_input("名称", key="wh_name")
+                _wh_name = st.text_input(_t("名称", "Name"), key="wh_name")
             with _wh2:
                 _wh_url = st.text_input("Webhook URL", key="wh_url")
             with _wh3:
-                _wh_kind = st.selectbox("类型", store.WEBHOOK_KINDS, key="wh_kind")
-            if st.button("添加 Webhook", key="add_webhook"):
+                _wh_kind = st.selectbox(_t("类型", "Type"), store.WEBHOOK_KINDS, key="wh_kind")
+            if st.button(_t("添加 Webhook", "Add webhook"), key="add_webhook"):
                 if _wh_name and _wh_url:
                     store.add_webhook(_wh_name, _wh_url, _wh_kind)
                     store.log_action(
-                        st.session_state.get("user", ""), "添加 Webhook", _wh_name
+                        st.session_state.get("user", ""), _t("添加 Webhook", "Add webhook"), _wh_name
                     )
-                    st.success("已添加")
+                    st.success(_t("已添加", "Added"))
                     st.rerun()
                 else:
-                    st.warning("请填写名称与 URL")
+                    st.warning(_t("请填写名称与 URL", "Enter a name and URL"))
             for _w in store.list_webhooks():
                 _wc1, _wc2 = st.columns([4, 1], vertical_alignment="center")
                 with _wc1:
@@ -2023,7 +2033,7 @@ def render_settings() -> None:
                         unsafe_allow_html=True,
                     )
                 with _wc2:
-                    if st.button("删除", key=f"del_webhook_{_w['id']}", use_container_width=True):
+                    if st.button(_t("删除", "Delete"), key=f"del_webhook_{_w['id']}", use_container_width=True):
                         store.delete_webhook(_w["id"])
                         store.log_action(
                             st.session_state.get("user", ""), "删除 Webhook", _w["name"]
@@ -2036,12 +2046,7 @@ def render_settings() -> None:
 _top_left, _top_right = st.columns([6.4, 3.2], vertical_alignment="center")
 with _top_left:
     st.markdown(
-        """
-        <div class="sg-topbar">
-          <span class="sg-topbar-title">威云-风险建模智能体</span>
-          <span class="sg-topbar-tag">STRIDE 威胁建模</span>
-        </div>
-        """,
+        _t("<div class=\"sg-topbar\">\n          <span class=\"sg-topbar-title\">威云-风险建模智能体</span>\n          <span class=\"sg-topbar-tag\">STRIDE 威胁建模</span>\n        </div>", "<div class=\"sg-topbar\">\n          <span class=\"sg-topbar-title\">Weiyun Risk Modeling Agent</span>\n          <span class=\"sg-topbar-tag\">STRIDE Threat Modeling</span>\n        </div>"),
         unsafe_allow_html=True,
     )
 with _top_right:
@@ -2063,14 +2068,18 @@ with _top_right:
         )
     with _cfg_col:
         if _is_admin():
-            _cfg_label = "返回主页" if st.session_state.get("view") == "settings" else "系统配置"
+            _cfg_label = (
+                _t("返回主页", "Back to home")
+                if st.session_state.get("view") == "settings"
+                else _t("系统配置", "System settings")
+            )
             if st.button(_cfg_label, key="settings_toggle", use_container_width=True):
                 st.session_state["view"] = (
                     "main" if st.session_state.get("view") == "settings" else "settings"
                 )
                 st.rerun()
     with _btn_col:
-        if st.button("退出系统", key="logout_top", use_container_width=True):
+        if st.button(_t("退出系统", "Sign out"), key="logout_top", use_container_width=True):
             st.session_state["confirm_logout"] = True
 
 if st.session_state.get("confirm_logout"):
@@ -2085,10 +2094,7 @@ if st.session_state.get("view") == "settings" and _is_admin():
 
 def _page_threat_model() -> None:
     st.markdown(
-        """
-威胁模型有助于识别和评估应用/系统面临的潜在安全威胁，提供系统化方法来理解可能的漏洞与攻击路径。
-使用此标签页可基于 STRIDE 方法生成威胁模型。
-"""
+        _t("威胁模型有助于识别和评估应用/系统面临的潜在安全威胁，提供系统化方法来理解可能的漏洞与攻击路径。\n使用此标签页可基于 STRIDE 方法生成威胁模型。", "Threat modeling identifies and evaluates potential security threats to an application or system, providing a systematic view of vulnerabilities and attack paths.\nUse this tab to generate a STRIDE threat model.")
     )
     st.markdown("""---""")
 
@@ -2097,12 +2103,12 @@ def _page_threat_model() -> None:
     if st.session_state.get("show_drawio_editor"):
         _hdr_l, _hdr_r = st.columns([1, 3])
         with _hdr_l:
-            if st.button("关闭图表编辑器", key="close_drawio", use_container_width=True):
+            if st.button(_t("关闭图表编辑器", "Close diagram editor"), key="close_drawio", use_container_width=True):
                 st.session_state["show_drawio_editor"] = False
                 st.rerun()
         with _hdr_r:
             if st.session_state.get("drawio_xml"):
-                st.success("图表已保存，将用于生成威胁模型。")
+                st.success(_t("图表已保存，将用于生成威胁模型。", "Diagram saved; it will be used for threat model generation."))
         # The key carries a per-open nonce (bumped by "Open Diagram Editor"). A
         # stable key makes Streamlit replay the component's last return value when
         # it re-mounts on reopen, which re-fires the previous save/close and shuts
@@ -2157,10 +2163,15 @@ def _page_threat_model() -> None:
         # _sync_app_desc), so they must run before render_app_description()
         # instantiates the text area, which the top-to-bottom order guarantees.
         st.caption(
-            "在下方描述你的应用。想快速起步，可从以下来源自动生成草稿：GitHub 仓库、上传的架构图、内置编辑器中绘制的图，或引导式构建器。生成后请检查并编辑。"
+            _t("在下方描述你的应用。想快速起步，可从以下来源自动生成草稿：GitHub 仓库、上传的架构图、内置编辑器中绘制的图，或引导式构建器。生成后请检查并编辑。", "Describe your application below. To get a head start, auto-generate a draft from a GitHub repo, an uploaded diagram, a diagram drawn in the built-in editor, or the guided builder.")
         )
         _gh_tab, _img_tab, _draw_tab, _guided_tab = st.tabs(
-            ["GitHub 仓库", "上传图片", "画架构图", "引导式"]
+            [
+                _t("GitHub 仓库", "GitHub repo"),
+                _t("上传图片", "Upload image"),
+                _t("画架构图", "Draw diagram"),
+                _t("引导式", "Guided"),
+            ]
         )
 
         with _gh_tab:
@@ -2169,7 +2180,7 @@ def _page_threat_model() -> None:
         with _img_tab:
             if not supports_image:
                 st.info(
-                    "图片上传需要支持视觉的模型（OpenAI、Google AI 或 Anthropic Claude 模型）。请在侧边栏切换模型，或使用 **画架构图** / **引导式** 标签页——它们适用于任何模型。"
+                    _t("图片上传需要支持视觉的模型（OpenAI、Google AI 或 Anthropic Claude 模型）。请在侧边栏切换模型，或使用 **画架构图** / **引导式** 标签页——它们适用于任何模型。", "Image upload needs a vision-capable model (OpenAI / Google AI / Anthropic Claude). Switch the model in the sidebar, or use the **Draw diagram** / **Guided** tabs, which work with any model.")
                 )
             else:
                 uploaded_file = st.file_uploader(
@@ -2196,21 +2207,21 @@ def _page_threat_model() -> None:
                     try:
                         if model_provider == "OpenAI API":
                             if not openai_api_key:
-                                st.error("请输入 OpenAI API Key 以分析图片。")
+                                st.error(_t("请输入 OpenAI API Key 以分析图片。", "Enter your OpenAI API key to analyze the image."))
                                 raise ValueError
                             image_analysis_output = get_image_analysis(
                                 openai_api_key, selected_model, image_analysis_prompt, base64_image
                             )
                         elif model_provider == "Google AI API":
                             if not google_api_key:
-                                st.error("请输入 Google AI API Key 以分析图片。")
+                                st.error(_t("请输入 Google AI API Key 以分析图片。", "Enter your Google AI API key to analyze the image."))
                                 raise ValueError
                             image_analysis_output = get_image_analysis_google(
                                 google_api_key, selected_model, image_analysis_prompt, base64_image
                             )
                         elif model_provider == "Anthropic API":
                             if not anthropic_api_key:
-                                st.error("请输入 Anthropic API Key 以分析图片。")
+                                st.error(_t("请输入 Anthropic API Key 以分析图片。", "Enter your Anthropic API key to analyze the image."))
                                 raise ValueError
                             image_analysis_output = get_image_analysis_anthropic(
                                 anthropic_api_key,
@@ -2235,13 +2246,13 @@ def _page_threat_model() -> None:
                             st.session_state["_sync_app_desc"] = True
                         else:
                             st.error(
-                                "图片分析失败，请检查 API Key 后重试。"
+                                _t("图片分析失败，请检查 API Key 后重试。", "Image analysis failed; check the API key and retry.")
                             )
                     except Exception as e:
                         st.error(f"分析图片时发生错误：{e!s}")
 
         with _draw_tab:
-            if st.button("打开图表编辑器", key="toggle_drawio", use_container_width=True):
+            if st.button(_t("打开图表编辑器", "Open diagram editor"), key="toggle_drawio", use_container_width=True):
                 st.session_state["show_drawio_editor"] = True
                 # Fresh nonce -> fresh component key -> no stale save/close replay.
                 st.session_state["drawio_editor_nonce"] = (
@@ -2249,8 +2260,8 @@ def _page_threat_model() -> None:
                 )
                 st.rerun()
             if st.session_state.get("drawio_xml"):
-                st.success("图表已保存，将用于生成威胁模型。")
-                if st.button("清除图表", key="clear_drawio"):
+                st.success(_t("图表已保存，将用于生成威胁模型。", "Diagram saved; it will be used for threat model generation."))
+                if st.button(_t("清除图表", "Clear diagram"), key="clear_drawio"):
                     st.session_state.pop("drawio_xml", None)
                     st.rerun()
 
@@ -2269,13 +2280,13 @@ def _page_threat_model() -> None:
     # Create input fields for additional details
     with col2:
         st.text_input(
-            "项目名称（用于报告归档）",
+            _t("项目名称（用于报告归档）", "Project name (for report archiving)"),
             key="project_name",
-            placeholder="留空则按应用描述自动取名",
-            help="生成结果会按项目名称归档到「报告历史」页面。",
+            placeholder=_t("留空则按应用描述自动取名", "Leave empty to auto-name from the description"),
+            help=_t("生成结果会按项目名称归档到「报告历史」页面。", "Results are archived under this project in Report history."),
         )
         app_type = st.selectbox(
-            label="选择应用类型",
+            label=_t("选择应用类型", "Application type"),
             options=[
                 "Web application",
                 "Mobile application",
@@ -2287,11 +2298,11 @@ def _page_threat_model() -> None:
                 "Other",
             ],
             key="app_type",
-            format_func=lambda x: _APP_TYPE_LABELS.get(x, x),
+            format_func=lambda x: _ui_label(_APP_TYPE_LABELS, _APP_TYPE_LABELS_EN, x),
         )
 
         sensitive_data = st.selectbox(
-            label="应用处理的数据最高敏感级别是？",
+            label=_t("应用处理的数据最高敏感级别是？", "Highest sensitivity of processed data?"),
             options=[
                 "Top Secret",
                 "Secret",
@@ -2301,48 +2312,36 @@ def _page_threat_model() -> None:
                 "None",
             ],
             key="sensitive_data",
-            format_func=lambda x: _SENSITIVE_DATA_LABELS.get(x, x),
+            format_func=lambda x: _ui_label(_SENSITIVE_DATA_LABELS, _SENSITIVE_DATA_LABELS_EN, x),
         )
 
         # Create input fields for internet_facing and authentication
         internet_facing = st.selectbox(
-            label="应用是否面向互联网？",
+            label=_t("应用是否面向互联网？", "Internet-facing?"),
             options=["Yes", "No"],
             key="internet_facing",
-            format_func=lambda x: _YES_NO_LABELS.get(x, x),
+            format_func=lambda x: _ui_label(_YES_NO_LABELS, _YES_NO_LABELS_EN, x),
         )
 
         authentication = st.multiselect(
-            "应用支持哪些身份认证方式？",
+            _t("应用支持哪些身份认证方式？", "Supported authentication methods?"),
             ["SSO", "MFA", "OAUTH2", "Basic", "None"],
             key="authentication",
-            placeholder="选择认证方式…",
-            format_func=lambda x: _AUTH_LABELS.get(x, x),
+            placeholder=_t("选择认证方式…", "Select authentication methods…"),
+            format_func=lambda x: _ui_label(_AUTH_LABELS, _AUTH_LABELS_EN, x),
         )
 
         # Show guidance for GenAI/Agentic applications
         if app_type == "Generative AI application":
             st.markdown("---")
             st.info(
-                """**为获得更好的威胁覆盖，请在描述中包含：**
-- LLM 提供商与模型（如 OpenAI GPT-5、Claude、微调版 Llama）
-- 使用的功能（RAG、函数调用、代码生成、嵌入）
-- 数据来源（文档、数据库、API、用户上传）
-- 输出的使用方式（展示、存储、执行、发送到外部）"""
+                _t("**为获得更好的威胁覆盖，请在描述中包含：**\n- LLM 提供商与模型（如 OpenAI GPT-5、Claude、微调版 Llama）\n- 使用的功能（RAG、函数调用、代码生成、嵌入）\n- 数据来源（文档、数据库、API、用户上传）\n- 输出的使用方式（展示、存储、执行、发送到外部）", "**For better coverage, include in your description:**\n- LLM provider and model (e.g. OpenAI GPT-5, Claude, fine-tuned Llama)\n- Features used (RAG, function calling, code generation, embeddings)\n- Data sources (documents, databases, APIs, uploads)\n- How outputs are used (displayed, stored, executed, sent externally)")
             )
 
         if app_type == "Agentic AI application":
             st.markdown("---")
             st.info(
-                """**为获得更好的威胁覆盖，请在描述中包含：**
-- 智能体框架（LangChain、CrewAI、AutoGen、自研）
-- 智能体能力（工具调用、代码执行、网页浏览、文件访问）
-- 如适用，多智能体细节（编排、通信）
-- 记忆/状态持久化机制
-- 人工监督级别（需审批、仅监控、完全自主）
-- 工具与集成（MCP 服务器、API、数据库）
-- 凭据访问（OAuth 令牌、API Key、服务账号）
-- 自主操作范围（无需审批能做什么？）"""
+                _t("**为获得更好的威胁覆盖，请在描述中包含：**\n- 智能体框架（LangChain、CrewAI、AutoGen、自研）\n- 智能体能力（工具调用、代码执行、网页浏览、文件访问）\n- 如适用，多智能体细节（编排、通信）\n- 记忆/状态持久化机制\n- 人工监督级别（需审批、仅监控、完全自主）\n- 工具与集成（MCP 服务器、API、数据库）\n- 凭据访问（OAuth 令牌、API Key、服务账号）\n- 自主操作范围（无需审批能做什么？）", "**For better coverage, include in your description:**\n- Agent framework (LangChain, CrewAI, AutoGen, custom)\n- Agent capabilities (tool use, code execution, web browsing, file access)\n- Multi-agent details if applicable (orchestration, communication)\n- Memory/state persistence\n- Human oversight level (approval required, monitoring only, fully autonomous)\n- Tools and integrations (MCP servers, APIs, databases)\n- Credential access (OAuth tokens, API keys, service accounts)\n- Autonomous scope (what can it do without approval?)")
             )
 
     # 草稿自动保存（刷新后自动恢复）
@@ -2363,7 +2362,7 @@ def _page_threat_model() -> None:
     # ------------------ Threat Model Generation ------------------ #
 
     # Create a submit button for Threat Modelling
-    threat_model_submit_button = st.button(label="生成威胁模型")
+    threat_model_submit_button = st.button(label=_t("生成威胁模型", "Generate threat model"))
 
     # If the Generate Threat Model button is clicked and the user has provided an application description
     if threat_model_submit_button and st.session_state.get("app_input"):
@@ -2396,7 +2395,7 @@ def _page_threat_model() -> None:
             st.session_state.pop("last_thinking_content", None)
 
         # Show a spinner while generating the threat model
-        with st.spinner("正在分析潜在威胁……"):
+        with st.spinner(_t("正在分析潜在威胁……", "Analyzing potential threats…")):
             max_retries = 3
             retry_count = 0
             while retry_count < max_retries:
@@ -2425,11 +2424,11 @@ def _page_threat_model() -> None:
                             and model_output["threat_model"][0].get("Threat Type") == "Error"
                         ):
                             st.warning(
-                                "生成威胁模型时出现问题，模型返回的格式可能不符合预期。你可以尝试："
+                                _t("生成威胁模型时出现问题，模型返回的格式可能不符合预期。你可以尝试：", "There was an issue generating the threat model; the format may be unexpected. Try:")
                             )
-                            st.markdown("1. 重新运行生成")
-                            st.markdown("2. 查看应用日志了解更多细节")
-                            st.markdown("3. 如果问题仍然存在，换一个模型")
+                            st.markdown(_t("1. 重新运行生成", "1. Run the generation again"))
+                            st.markdown(_t("2. 查看应用日志了解更多细节", "2. Check the application logs for details"))
+                            st.markdown(_t("3. 如果问题仍然存在，换一个模型", "3. Try a different model if the issue persists"))
                     elif model_provider == "LM Studio Server":
                         model_output = get_threat_model_lm_studio(
                             st.session_state["lm_studio_endpoint"],
@@ -2470,7 +2469,7 @@ def _page_threat_model() -> None:
                     if _cov["missing"]:
                         st.warning("STRIDE 覆盖度：缺少 " + "、".join(_cov["missing"]) + " 类威胁")
                     else:
-                        st.success("STRIDE 覆盖度：六类威胁均已覆盖")
+                        st.success(_t("STRIDE 覆盖度：六类威胁均已覆盖", "STRIDE coverage: all six categories covered"))
                     break  # Exit the loop if successful
                 except Exception as e:
                     retry_count += 1
@@ -2487,7 +2486,7 @@ def _page_threat_model() -> None:
 # （继续）显示威胁模型输出
     # If the submit button is clicked and the user has not provided an application description
     if threat_model_submit_button and not st.session_state.get("app_input"):
-        st.error("提交前请先输入应用详情。")
+        st.error(_t("提交前请先输入应用详情。", "Enter application details before submitting."))
 
     # Display threat model from session state (persists across reruns)
     if st.session_state.get("threat_model_markdown"):
@@ -2509,7 +2508,7 @@ def _page_threat_model() -> None:
 
         # Add a button to allow the user to download the output as a Markdown file
         st.download_button(
-            label="下载威胁模型",
+            label=_t("下载威胁模型", "Download threat model"),
             data=st.session_state["threat_model_markdown"],
             file_name="threat_model.md",
             mime="text/markdown",
@@ -2520,23 +2519,21 @@ def _page_threat_model() -> None:
 
 def _page_attack_tree() -> None:
     st.markdown(
-        """
-攻击树是一种结构化的系统安全分析方法，以层级形式表示潜在攻击场景：树根是攻击者的最终目标，各分支是达成目标的不同路径。这有助于理解系统漏洞并确定缓解措施的优先级。
-"""
+        _t("攻击树是一种结构化的系统安全分析方法，以层级形式表示潜在攻击场景：树根是攻击者的最终目标，各分支是达成目标的不同路径。这有助于理解系统漏洞并确定缓解措施的优先级。", "Attack trees structure potential attack scenarios hierarchically: the root is the attacker's goal, and branches are alternative paths. They help understand vulnerabilities and prioritize mitigations.")
     )
     st.markdown("""---""")
     if model_provider == "Mistral API" and selected_model == "mistral-small-2506":
         st.warning(
-            "Mistral Small 生成的 Mermaid 代码语法不一定正确。请使用 Mistral Large 生成攻击树，或选择其他模型提供商。"
+            _t("Mistral Small 生成的 Mermaid 代码语法不一定正确。请使用 Mistral Large 生成攻击树，或选择其他模型提供商。", "Mistral Small may generate syntactically incorrect Mermaid. Use Mistral Large, or choose another provider.")
         )
     else:
         if model_provider == "LM Studio Server":
             st.warning(
-                "使用本地 LLM 生成攻击树时可能出现语法错误。可以尝试不同的本地 LLM 以评估输出质量，或考虑使用云端模型提供商。"
+                _t("使用本地 LLM 生成攻击树时可能出现语法错误。可以尝试不同的本地 LLM 以评估输出质量，或考虑使用云端模型提供商。", "Local LLMs may produce syntax errors in attack trees. Try different local models, or use a hosted provider.")
             )
 
         # Create a submit button for Attack Tree
-        attack_tree_submit_button = st.button(label="生成攻击树")
+        attack_tree_submit_button = st.button(label=_t("生成攻击树", "Generate attack tree"))
 
         # If the Generate Attack Tree button is clicked and the user has provided an application description
         if attack_tree_submit_button and st.session_state.get("app_input"):
@@ -2559,7 +2556,7 @@ def _page_attack_tree() -> None:
                 st.session_state.pop("last_thinking_content", None)
 
             # Show a spinner while generating the attack tree
-            with st.spinner("正在生成攻击树……"):
+            with st.spinner(_t("正在生成攻击树……", "Generating attack tree…")):
                 try:
                     # Call the relevant get_attack_tree function with the generated prompt
                     if model_provider == "OpenAI API":
@@ -2627,18 +2624,18 @@ def _page_attack_tree() -> None:
                     with col1:
                         # Add a button to allow the user to download the Mermaid code
                         st.download_button(
-                            label="下载图表代码",
+                            label=_t("下载图表代码", "Download diagram code"),
                             data=mermaid_code,
                             file_name="attack_tree.md",
                             mime="text/plain",
-                            help="下载攻击树的 Mermaid 代码。",
+                            help=_t("下载攻击树的 Mermaid 代码。", "Download the Mermaid code for this attack tree."),
                         )
 
                     with col2:
                         # Add a button to allow the user to open the Mermaid Live editor
                         # Not assigned: a link button has no return value
                         # worth reading, it just renders.
-                        st.link_button("在 Mermaid Live 中打开", "https://mermaid.live")
+                        st.link_button(_t("在 Mermaid Live 中打开", "Open in Mermaid Live"), "https://mermaid.live")
 
                     with col3:
                         # Blank placeholder
@@ -2660,17 +2657,7 @@ def _page_attack_tree() -> None:
 
 def _page_data_flow() -> None:
     st.markdown(
-        """
-数据流图（DFD）让待分析的系统变得清晰可读：它列出每个外部实体、处理过程和数据存储，并展示它们之间的数据流。更关键的是，它能标出
-**信任边界**——攻击者必须跨越的界线。数据流图是威胁建模的基础；审阅数据流图是确认 STRIDE-GPT 与你对系统的理解一致的最直接方式。
-
-本标签页有三种用法：
-
-1. 从应用描述**生成 DFD**，然后编辑成符合你理解的样子。
-2. **上传已有的 DFD 图片**，转换为可编辑的 Mermaid 形式。
-3. 图表确认无误后，勾选 **将此 DFD 用于威胁模型**，将其注入后续的
-   威胁模型和攻击树分析。
-"""
+        _t("数据流图（DFD）让待分析的系统变得清晰可读：它列出每个外部实体、处理过程和数据存储，并展示它们之间的数据流。更关键的是，它能标出\n**信任边界**——攻击者必须跨越的界线。数据流图是威胁建模的基础；审阅数据流图是确认 STRIDE-GPT 与你对系统的理解一致的最直接方式。\n\n本标签页有三种用法：\n\n1. 从应用描述**生成 DFD**，然后编辑成符合你理解的样子。\n2. **上传已有的 DFD 图片**，转换为可编辑的 Mermaid 形式。\n3. 图表确认无误后，勾选 **将此 DFD 用于威胁模型**，将其注入后续的\n   威胁模型和攻击树分析。", "A Data Flow Diagram (DFD) makes the system legible: it names every external entity, process and data store, and shows the flows between them. Crucially, it marks **trust boundaries** — the lines an attacker must cross. DFDs are foundational to threat modeling.\n\nThree ways to use this tab:\n\n1. **Generate a DFD** from your description, then edit it to match your understanding.\n2. **Upload an existing DFD image** to convert it into editable Mermaid.\n3. Once the diagram looks right, tick **Use this DFD for the threat model** to feed it into the next Threat Model and Attack Tree runs.")
     )
     st.markdown("""---""")
 
@@ -2679,14 +2666,14 @@ def _page_data_flow() -> None:
     dfd_input_col1, dfd_input_col2 = st.columns([1, 1])
 
     with dfd_input_col1:
-        st.markdown("**从描述生成**")
+        st.markdown(_t("**从描述生成**", "**Generate from description**"))
         dfd_generate_button = st.button(
-            label="生成 DFD",
-            help="使用你的应用描述和侧边栏设置起草 DFD。",
+            label=_t("生成 DFD", "Generate DFD"),
+            help=_t("使用你的应用描述和侧边栏设置起草 DFD。", "Draft a DFD from your application description and sidebar settings."),
         )
 
     with dfd_input_col2:
-        st.markdown("**或解析已有的 DFD 图片**")
+        st.markdown(_t("**或解析已有的 DFD 图片**", "**Or parse an existing DFD image**"))
         # Vision support set is the same as for architecture diagrams.
         dfd_vision_supported = (
             (model_provider == "OpenAI API" and (
@@ -2705,7 +2692,7 @@ def _page_data_flow() -> None:
         else:
             uploaded_dfd_image = None
             st.caption(
-                "图片解析需要支持视觉的模型（OpenAI GPT-4/5、Anthropic Claude 或 Google Gemini）。"
+                _t("图片解析需要支持视觉的模型（OpenAI GPT-4/5、Anthropic Claude 或 Google Gemini）。", "Image parsing requires a vision-capable model (OpenAI GPT-4/5, Anthropic Claude, or Google Gemini).")
             )
 
     # --- Section 2: Handle Generation --- #
@@ -2733,7 +2720,7 @@ def _page_data_flow() -> None:
                 ".env 文件）后再生成 DFD。"
             )
         else:
-            with st.spinner("正在生成数据流图……"):
+            with st.spinner(_t("正在生成数据流图……", "Generating data flow diagram…")):
                 try:
                     if model_provider == "OpenAI API":
                         dfd_mermaid = get_dfd_openai(_dfd_api_key, selected_model, dfd_prompt)
@@ -2764,7 +2751,7 @@ def _page_data_flow() -> None:
                 except Exception as e:
                     st.error(f"生成 DFD 失败：{e}")
     elif dfd_generate_button and not st.session_state.get("app_input"):
-        st.error("请先在威胁模型标签页输入应用详情。")
+        st.error(_t("请先在威胁模型标签页输入应用详情。", "Enter application details on the Threat model page first."))
 
     # --- Section 3: Handle Image Parsing --- #
 
@@ -2778,7 +2765,7 @@ def _page_data_flow() -> None:
                     f"请输入你的 {model_provider} Key（在侧边栏填写）后再上传 DFD 图片。"
                 )
             else:
-                with st.spinner("正在解析 DFD 图片……"):
+                with st.spinner(_t("正在解析 DFD 图片……", "Parsing DFD image…")):
                     try:
                         image_bytes = uploaded_dfd_image.read()
                         base64_image = base64.b64encode(image_bytes).decode("utf-8")
@@ -2809,20 +2796,20 @@ def _page_data_flow() -> None:
     # --- Section 4: Editor + Preview --- #
 
     st.markdown("---")
-    st.markdown("**Mermaid 源码**（可自由编辑——重新运行后预览会更新）：")
+    st.markdown(_t("**Mermaid 源码**（可自由编辑——重新运行后预览会更新）：", "**Mermaid source** (edit freely — preview updates on rerun):"))
     dfd_editor_value = st.text_area(
-        "DFD Mermaid 代码",
+        _t("DFD Mermaid 代码", "DFD Mermaid code"),
         value=st.session_state.get("dfd_mermaid", ""),
         height=260,
         key="dfd_editor",
         label_visibility="collapsed",
-        placeholder="还没有 DFD。点击“生成 DFD”或上传图片以填充此编辑器。",
+        placeholder=_t("还没有 DFD。点击“生成 DFD”或上传图片以填充此编辑器。", "No DFD yet. Use \"Generate DFD\" or upload an image to populate this editor."),
     )
     # Keep dfd_mermaid in sync with the editor so it survives reruns.
     st.session_state["dfd_mermaid"] = dfd_editor_value
 
     if dfd_editor_value.strip():
-        st.markdown("**图表预览：**")
+        st.markdown(_t("**图表预览：**", "**Diagram preview:**"))
         try:
             mermaid(dfd_editor_value)
         except Exception as e:
@@ -2831,10 +2818,10 @@ def _page_data_flow() -> None:
         # --- Section 5: Confirm + Download --- #
 
         confirmed = st.checkbox(
-            "将此 DFD 用于威胁模型",
+            _t("将此 DFD 用于威胁模型", "Use this DFD for the threat model"),
             value=bool(st.session_state.get("confirmed_dfd")),
             help=(
-                "勾选后，此 DFD 会包含在威胁模型和攻击树的提示词中，使分析结果与图表保持一致。"
+                _t("勾选后，此 DFD 会包含在威胁模型和攻击树的提示词中，使分析结果与图表保持一致。", "When ticked, this DFD is included in the Threat Model and Attack Tree prompts so the analysis aligns with the diagram.")
             ),
             key="dfd_confirm_checkbox",
         )
@@ -2842,41 +2829,37 @@ def _page_data_flow() -> None:
         if confirmed:
             st.session_state["confirmed_dfd"] = dfd_editor_value
             st.success(
-                "DFD 已确认——将作为系统模型用于后续的威胁模型和攻击树分析。"
+                _t("DFD 已确认——将作为系统模型用于后续的威胁模型和攻击树分析。", "DFD confirmed — it will be the system model for subsequent Threat Model and Attack Tree runs.")
             )
         else:
             st.session_state.pop("confirmed_dfd", None)
             st.caption(
-                "未启用。勾选上方复选框即可将此 DFD 注入下一次分析。"
+                _t("未启用。勾选上方复选框即可将此 DFD 注入下一次分析。", "Not in use. Tick the checkbox above to feed this DFD into the next analysis.")
             )
 
         dfd_dl_col1, dfd_dl_col2, _ = st.columns([1, 1, 3])
         with dfd_dl_col1:
             st.download_button(
-                label="下载图表代码",
+                label=_t("下载图表代码", "Download diagram code"),
                 data=dfd_editor_value,
                 file_name="data_flow_diagram.md",
                 mime="text/plain",
-                help="下载此 DFD 的 Mermaid 源码。",
+                help=_t("下载此 DFD 的 Mermaid 源码。", "Download the Mermaid source for this DFD."),
             )
         with dfd_dl_col2:
-            st.link_button("在 Mermaid Live 中打开", "https://mermaid.live")
+            st.link_button(_t("在 Mermaid Live 中打开", "Open in Mermaid Live"), "https://mermaid.live")
 
 
 # ------------------ Mitigations Generation ------------------ #
 
 def _page_mitigations() -> None:
     st.markdown(
-        """
-使用此标签页为威胁模型中识别出的威胁生成潜在缓解措施。缓解措施是安全控制或
-对策，可帮助降低安全威胁发生的可能性或影响。生成的缓解措施可用于增强
-应用的安全防护能力，抵御潜在攻击。
-"""
+        _t("使用此标签页为威胁模型中识别出的威胁生成潜在缓解措施。缓解措施是安全控制或\n对策，可帮助降低安全威胁发生的可能性或影响。生成的缓解措施可用于增强\n应用的安全防护能力，抵御潜在攻击。", "Use this tab to generate potential mitigations for the threats identified in the threat model. Mitigations are security controls or countermeasures that reduce the likelihood or impact of a threat.")
     )
     st.markdown("""---""")
 
     # Create a submit button for Mitigations
-    mitigations_submit_button = st.button(label="生成缓解措施")
+    mitigations_submit_button = st.button(label=_t("生成缓解措施", "Suggest mitigations"))
 
     # If the Suggest Mitigations button is clicked and the user has identified threats
     if mitigations_submit_button:
@@ -2896,7 +2879,7 @@ def _page_mitigations() -> None:
                 st.session_state.pop("last_thinking_content", None)
 
             # Show a spinner while suggesting mitigations
-            with st.spinner("正在生成缓解措施……"):
+            with st.spinner(_t("正在生成缓解措施……", "Suggesting mitigations…")):
                 max_retries = 3
                 retry_count = 0
                 while retry_count < max_retries:
@@ -2963,7 +2946,7 @@ def _page_mitigations() -> None:
 
                         # Add a button to allow the user to download the mitigations as a Markdown file
                         st.download_button(
-                            label="下载缓解措施",
+                            label=_t("下载缓解措施", "Download mitigations"),
                             data=mitigations_markdown,
                             file_name="mitigations.md",
                             mime="text/markdown",
@@ -2984,22 +2967,17 @@ def _page_mitigations() -> None:
 
             st.markdown("")
         else:
-            st.error("请先生成威胁模型，再生成缓解措施。")
+            st.error(_t("请先生成威胁模型，再生成缓解措施。", "Generate a threat model before suggesting mitigations."))
 
 # ------------------ DREAD Risk Assessment Generation ------------------ #
 def _page_dread() -> None:
     st.markdown(
-        """
-DREAD 是一种评估和排序安全威胁风险的方法，从 **D**amage potential（潜在损害）、
-**R**eproducibility（可复现性）、**E**xploitability（可利用性）、**A**ffected users（受影响用户）和
-**D**iscoverability（可发现性）五个维度评估威胁，从而确定整体风险等级，
-优先处理最关键的威胁。使用此标签页对应用/系统进行 DREAD 风险评估。
-"""
+        _t("DREAD 是一种评估和排序安全威胁风险的方法，从 **D**amage potential（潜在损害）、\n**R**eproducibility（可复现性）、**E**xploitability（可利用性）、**A**ffected users（受影响用户）和\n**D**iscoverability（可发现性）五个维度评估威胁，从而确定整体风险等级，\n优先处理最关键的威胁。使用此标签页对应用/系统进行 DREAD 风险评估。", "DREAD evaluates and prioritizes risks across **D**amage potential, **R**eproducibility, **E**xploitability, **A**ffected users and **D**iscoverability, helping focus on the most critical threats first.")
     )
     st.markdown("""---""")
 
     # Create a submit button for DREAD Risk Assessment
-    dread_assessment_submit_button = st.button(label="生成 DREAD 风险评估")
+    dread_assessment_submit_button = st.button(label=_t("生成 DREAD 风险评估", "Generate DREAD risk assessment"))
     # If the Generate DREAD Risk Assessment button is clicked and the user has identified threats
     if dread_assessment_submit_button:
         # Check if threat_model data exists
@@ -3017,7 +2995,7 @@ DREAD 是一种评估和排序安全威胁风险的方法，从 **D**amage poten
                 st.session_state.pop("last_thinking_content", None)
 
             # Show a spinner while generating DREAD Risk Assessment
-            with st.spinner("正在生成 DREAD 风险评估……"):
+            with st.spinner(_t("正在生成 DREAD 风险评估……", "Generating DREAD risk assessment…")):
                 max_retries = 3
                 retry_count = 0
                 while retry_count < max_retries:
@@ -3067,7 +3045,7 @@ DREAD 是一种评估和排序安全威胁风险的方法，从 **D**amage poten
                             dread_assessment = {"Risk Assessment": []}
                             # Add debug information
                             st.error(
-                                "调试：响应中未找到威胁。请尝试重新生成威胁模型。"
+                                _t("调试：响应中未找到威胁。请尝试重新生成威胁模型。", "Debug: no threats found in the response. Try regenerating the threat model.")
                             )
                         else:
                             st.warning(
@@ -3080,7 +3058,7 @@ DREAD 是一种评估和排序安全威胁风险的方法，从 **D**amage poten
             # Add debug information about the assessment
             if not dread_assessment.get("Risk Assessment"):
                 st.warning(
-                    "调试：DREAD 评估响应为空。请确认已先生成威胁模型。"
+                    _t("调试：DREAD 评估响应为空。请确认已先生成威胁模型。", "Debug: the DREAD response is empty. Ensure a threat model was generated first.")
                 )
 
             # Display thinking content in an expander if available and using a model with thinking capabilities
@@ -3097,9 +3075,9 @@ DREAD 是一种评估和排序安全威胁风险的方法，从 **D**amage poten
                     st.markdown(st.session_state["last_thinking_content"])
 
             # Display the DREAD assessment with a header
-            st.markdown("## DREAD 风险评估")
+            st.markdown(_t("## DREAD 风险评估", "## DREAD risk assessment"))
             st.markdown(
-                "下表展示每个已识别威胁的 DREAD 风险评估。风险评分取五个 DREAD 维度的平均值。"
+                _t("下表展示每个已识别威胁的 DREAD 风险评估。风险评分取五个 DREAD 维度的平均值。", "The table below shows the DREAD assessment for each identified threat. Risk Score is the average of the five DREAD categories.")
             )
 
             # Display the DREAD assessment in Markdown format
@@ -3107,14 +3085,14 @@ DREAD 是一种评估和排序安全威胁风险的方法，从 **D**amage poten
 
             # Add a button to allow the user to download the DREAD assessment as a Markdown file
             st.download_button(
-                label="下载 DREAD 风险评估",
+                label=_t("下载 DREAD 风险评估", "Download DREAD risk assessment"),
                 data=dread_assessment_markdown,
                 file_name="dread_assessment.md",
                 mime="text/markdown",
             )
         else:
             st.error(
-                "请先生成威胁模型，再请求 DREAD 风险评估。"
+                _t("请先生成威胁模型，再请求 DREAD 风险评估。", "Generate a threat model before requesting a DREAD assessment.")
             )
 
 
@@ -3122,15 +3100,12 @@ DREAD 是一种评估和排序安全威胁风险的方法，从 **D**amage poten
 
 def _page_test_cases() -> None:
     st.markdown(
-        """
-测试用例用于验证应用的安全性，确保潜在漏洞被发现并修复。此标签页可使用 Gherkin 语法生成测试用例。Gherkin 以 Given-When-Then 的简洁语法，
-用纯文本结构化地描述应用行为，便于编写清晰、可执行的测试场景。
-"""
+        _t("测试用例用于验证应用的安全性，确保潜在漏洞被发现并修复。此标签页可使用 Gherkin 语法生成测试用例。Gherkin 以 Given-When-Then 的简洁语法，\n用纯文本结构化地描述应用行为，便于编写清晰、可执行的测试场景。", "Test cases validate application security and ensure potential vulnerabilities are found and fixed. This tab generates Gherkin test cases using the Given-When-Then syntax.")
     )
     st.markdown("""---""")
 
     # Create a submit button for Test Cases
-    test_cases_submit_button = st.button(label="生成测试用例")
+    test_cases_submit_button = st.button(label=_t("生成测试用例", "Generate test cases"))
 
     # If the Generate Test Cases button is clicked and the user has identified threats
     if test_cases_submit_button:
@@ -3150,7 +3125,7 @@ def _page_test_cases() -> None:
                 st.session_state.pop("last_thinking_content", None)
 
             # Show a spinner while generating test cases
-            with st.spinner("正在生成测试用例……"):
+            with st.spinner(_t("正在生成测试用例……", "Generating test cases…")):
                 max_retries = 3
                 retry_count = 0
                 while retry_count < max_retries:
@@ -3217,7 +3192,7 @@ def _page_test_cases() -> None:
 
                         # Add a button to allow the user to download the test cases as a Markdown file
                         st.download_button(
-                            label="下载测试用例",
+                            label=_t("下载测试用例", "Download test cases"),
                             data=test_cases_markdown,
                             file_name="test_cases.md",
                             mime="text/markdown",
@@ -3239,7 +3214,24 @@ def _page_test_cases() -> None:
             st.markdown("")
 
         else:
-            st.error("请先生成威胁模型，再请求测试用例。")
+            st.error(_t("请先生成威胁模型，再请求测试用例。", "Generate a threat model before requesting test cases."))
+
+
+_KIND_LABELS_EN = {
+    "threat_model": "Threat Model",
+    "attack_tree": "Attack Tree",
+    "dfd": "Data Flow Diagram",
+    "mitigations": "Mitigations",
+    "dread": "DREAD Assessment",
+    "test_cases": "Test Cases",
+}
+
+
+def _kind_label(kind: str) -> str:
+    """报告类型的中英标签。"""
+    if _i18n.current_language() == "en":
+        return _KIND_LABELS_EN.get(kind, kind)
+    return KIND_LABELS.get(kind, kind)
 
 
 def _archive(
@@ -3277,7 +3269,7 @@ def _archive(
 @st.dialog("报告详情", width="large")
 def _report_dialog(report: dict) -> None:
     st.caption(
-        f"{KIND_LABELS.get(report['kind'], report['kind'])} · {report['project'] or '未命名'}"
+        f"{_kind_label(report['kind'])} · {report['project'] or '未命名'}"
         f" · {report['created_at']} · {report['provider']}/{report['model']}"
     )
     if report.get("kind") == "threat_model" and report.get("content_json"):
@@ -3295,10 +3287,38 @@ def _report_dialog(report: dict) -> None:
         except Exception:
             pass
     st.markdown(report["content_md"])
+    _dl1, _dl2, _dl3 = st.columns(3)
+    with _dl1:
+        st.download_button(
+            _t("下载 Word", "Download Word"),
+            data=_exporters.markdown_to_docx(report),
+            file_name=_exporters.suggested_filename(report, "docx"),
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key=f"dlg_docx_{report['id']}",
+            use_container_width=True,
+        )
+    with _dl2:
+        if st.button(_t("生成 PDF", "Generate PDF"), key=f"dlg_pdf_btn_{report['id']}", use_container_width=True):
+            try:
+                with st.spinner(_t("正在生成 PDF…", "Generating PDF…")):
+                    st.session_state[f"_pdf_{report['id']}"] = _exporters.report_to_pdf(report)
+            except Exception as _exc:
+                st.error(f"PDF 生成失败：{_exc}")
+    with _dl3:
+        _pdf_bytes = st.session_state.get(f"_pdf_{report['id']}")
+        if _pdf_bytes:
+            st.download_button(
+                _t("下载 PDF", "Download PDF"),
+                data=_pdf_bytes,
+                file_name=_exporters.suggested_filename(report, "pdf"),
+                mime="application/pdf",
+                key=f"dlg_pdf_dl_{report['id']}",
+                use_container_width=True,
+            )
     _d1, _d2, _d3, _d4, _d5 = st.columns(5)
     with _d1:
         st.download_button(
-            "下载 Markdown",
+            _t("下载 Markdown", "Download Markdown"),
             data=report["content_md"],
             file_name=f"report-{report['id']}.md",
             mime="text/markdown",
@@ -3307,7 +3327,7 @@ def _report_dialog(report: dict) -> None:
         )
     with _d2:
         st.download_button(
-            "下载 HTML",
+            _t("下载 HTML", "Download HTML"),
             data=report_to_html(report),
             file_name=f"report-{report['id']}.html",
             mime="text/html",
@@ -3317,7 +3337,7 @@ def _report_dialog(report: dict) -> None:
     with _d3:
         if report.get("content_json"):
             st.download_button(
-                "下载 JSON",
+                _t("下载 JSON", "Download JSON"),
                 data=report["content_json"],
                 file_name=f"report-{report['id']}.json",
                 mime="application/json",
@@ -3333,7 +3353,7 @@ def _report_dialog(report: dict) -> None:
             except Exception:
                 _tm = []
             st.download_button(
-                "下载 SARIF",
+                _t("下载 SARIF", "Download SARIF"),
                 data=_json.dumps(
                     _generation.threat_model_to_sarif(
                         _tm, project=report.get("project") or "", description=""
@@ -3347,7 +3367,7 @@ def _report_dialog(report: dict) -> None:
                 use_container_width=True,
             )
     with _d5:
-        if st.button("关闭", key=f"dlg_close_{report['id']}", use_container_width=True):
+        if st.button(_t("关闭", "Close"), key=f"dlg_close_{report['id']}", use_container_width=True):
             st.session_state.pop("_report_view_id", None)
             st.rerun()
 
@@ -3359,16 +3379,19 @@ def _page_reports() -> None:
 
     _f1, _f2, _f3, _f4 = st.columns([1.1, 1.3, 2, 1.3], vertical_alignment="bottom")
     with _f1:
-        _kind_label = st.selectbox("类型", ["全部", *KIND_LABELS.values()], key="hist_kind")
+        _kind_options = [_t("全部", "All")] + [_kind_label(k) for k in KIND_LABELS]
+        _kind_choice = st.selectbox(_t("类型", "Type"), _kind_options, key="hist_kind")
     with _f2:
-        _project = st.selectbox("项目", ["全部", *_projects], key="hist_project")
+        _project = st.selectbox(
+            _t("项目", "Project"), [_t("全部", "All"), *_projects], key="hist_project"
+        )
     with _f3:
         _search = st.text_input(
-            "搜索", key="hist_search", placeholder="按标题 / 项目 / 内容关键字"
+            _t("搜索", "Search"), key="hist_search", placeholder=_t("按标题 / 项目 / 内容关键字", "Title / project / content keyword")
         )
     with _f4:
         st.download_button(
-            "导出全部 (ZIP)",
+            _t("导出全部 (ZIP)", "Export all (ZIP)"),
             data=export_zip(_rows),
             file_name=f"weiyun-reports-{datetime.now().strftime('%Y%m%d-%H%M')}.zip",
             mime="application/zip",
@@ -3376,17 +3399,17 @@ def _page_reports() -> None:
             disabled=not _rows,
         )
 
-    _kind_rev = {v: k for k, v in KIND_LABELS.items()}
+    _kind_rev = {_kind_label(k): k for k in KIND_LABELS}
     _filtered = list_reports(
-        kind=None if _kind_label == "全部" else _kind_rev.get(_kind_label),
-        project=None if _project == "全部" else _project,
+        kind=None if _kind_choice == _t("全部", "All") else _kind_rev.get(_kind_choice),
+        project=None if _project == _t("全部", "All") else _project,
         search=_search or None,
         limit=300,
     )
 
     st.caption(f"共 {len(_filtered)} 条记录（库内总计 {report_count()} 条）")
     if not _filtered:
-        st.info("暂无历史报告。生成威胁模型、攻击树、数据流图等结果后会自动归档到这里。")
+        st.info(_t("暂无历史报告。生成威胁模型、攻击树、数据流图等结果后会自动归档到这里。", "No reports yet. Generated threat models, attack trees, DFDs and more are archived here automatically."))
         return
 
     for _r in _filtered:
@@ -3394,7 +3417,7 @@ def _page_reports() -> None:
             _c1, _c2 = st.columns([5, 2.6], vertical_alignment="center")
             with _c1:
                 st.markdown(
-                    f"**{KIND_LABELS.get(_r['kind'], _r['kind'])}** · {_r['project'] or '未命名'}"
+                    f"**{_kind_label(_r['kind'])}** · {_r['project'] or '未命名'}"
                     f"  \n<span class='sg-rep-meta'>{_r['created_at']} · "
                     f"{_r['provider']}/{_r['model']}</span>",
                     unsafe_allow_html=True,
@@ -3402,7 +3425,7 @@ def _page_reports() -> None:
             with _c2:
                 _b1, _b2, _b3, _b4 = st.columns(4)
                 with _b1:
-                    if st.button("查看", key=f"view_{_r['id']}", use_container_width=True):
+                    if st.button(_t("查看", "View"), key=f"view_{_r['id']}", use_container_width=True):
                         st.session_state["_report_view_id"] = _r["id"]
                         st.rerun()
                 with _b2:
@@ -3424,7 +3447,7 @@ def _page_reports() -> None:
                         use_container_width=True,
                     )
                 with _b4:
-                    if st.button("删除", key=f"del_{_r['id']}", use_container_width=True):
+                    if st.button(_t("删除", "Delete"), key=f"del_{_r['id']}", use_container_width=True):
                         delete_report(_r["id"])
                         store.log_action(
                             st.session_state.get("user", ""), "删除报告", f"#{_r['id']}"
@@ -3532,12 +3555,12 @@ def _run_full_pipeline(project: str, description: str) -> None:
     """一键生成全套产物并归档到指定项目。"""
     _desc = (description or "").strip()
     if not _desc:
-        st.warning("请先填写并保存应用描述。")
+        st.warning(_t("请先填写并保存应用描述。", "Fill in and save the application description first."))
         return
     _provider = st.session_state.get("model_provider", "OpenAI API")
     _skey = _KEY_BY_PROVIDER.get(_provider)
     if _skey and not st.session_state.get(_skey):
-        st.warning("请先在「系统配置」中填写该提供商的 API Key。")
+        st.warning(_t("请先在「系统配置」中填写该提供商的 API Key。", "Enter the provider's API key in System settings first."))
         return
 
     _app_type = st.session_state.get("app_type", "Web application")
@@ -3552,19 +3575,19 @@ def _run_full_pipeline(project: str, description: str) -> None:
     st.session_state["app_input"] = _desc
     st.session_state["app_desc"] = _desc
 
-    _steps = ["威胁模型", "数据流图", "攻击树", "缓解措施", "DREAD 风险评估", "测试用例"]
+    _steps = [_t("威胁模型", "Threat Model"), _t("数据流图", "Data Flow Diagram"), _t("攻击树", "Attack Tree"), _t("缓解措施", "Mitigations"), _t("DREAD 风险评估", "DREAD Assessment"), _t("测试用例", "Test Cases")]
     _bar = st.progress(0.0, text="准备中…")
     _log = st.container()
     _tm_md = ""
 
     for _i, _label in enumerate(_steps, 1):
         _bar.progress((_i - 1) / len(_steps), text=f"正在生成：{_label}")
-        if _label in ("缓解措施", "DREAD 风险评估", "测试用例") and not _tm_md:
+        if _label in (_t("缓解措施", "Mitigations"), _t("DREAD 风险评估", "DREAD Assessment"), _t("测试用例", "Test Cases")) and not _tm_md:
             with _log:
                 st.markdown(f"- ⏭️ {_label}（跳过：威胁模型未生成成功）")
             continue
         try:
-            if _label == "威胁模型":
+            if _label == _t("威胁模型", "Threat Model"):
                 _prompt = create_threat_model_prompt(
                     _app_type, _auth, _facing, _sens, _desc, confirmed_dfd=_dfd
                 )
@@ -3582,14 +3605,14 @@ def _run_full_pipeline(project: str, description: str) -> None:
                     project=project,
                     description=_desc,
                 )
-            elif _label == "数据流图":
+            elif _label == _t("数据流图", "Data Flow Diagram"):
                 _prompt = create_dfd_prompt(_app_type, _auth, _facing, _sens, _desc)
                 _mermaid = _run_model("dfd", _prompt)
                 st.session_state["dfd_mermaid"] = _mermaid
                 _archive(
                     "dfd", f"```mermaid\n{_mermaid}\n```", project=project, description=_desc
                 )
-            elif _label == "攻击树":
+            elif _label == _t("攻击树", "Attack Tree"):
                 _prompt = create_attack_tree_prompt(
                     _app_type, _auth, _facing, _sens, _desc, confirmed_dfd=_dfd
                 )
@@ -3600,7 +3623,7 @@ def _run_full_pipeline(project: str, description: str) -> None:
                     project=project,
                     description=_desc,
                 )
-            elif _label == "缓解措施":
+            elif _label == _t("缓解措施", "Mitigations"):
                 _prompt = create_mitigations_prompt(
                     _tm_md, is_genai=_is_genai, is_agentic=_is_agentic
                 )
@@ -3610,7 +3633,7 @@ def _run_full_pipeline(project: str, description: str) -> None:
                     project=project,
                     description=_desc,
                 )
-            elif _label == "DREAD 风险评估":
+            elif _label == _t("DREAD 风险评估", "DREAD Assessment"):
                 _prompt = create_dread_assessment_prompt(
                     _tm_md, is_genai=_is_genai, is_agentic=_is_agentic
                 )
@@ -3623,7 +3646,7 @@ def _run_full_pipeline(project: str, description: str) -> None:
                     project=project,
                     description=_desc,
                 )
-            elif _label == "测试用例":
+            elif _label == _t("测试用例", "Test Cases"):
                 _prompt = create_test_cases_prompt(
                     _tm_md, is_genai=_is_genai, is_agentic=_is_agentic
                 )
@@ -3640,7 +3663,7 @@ def _run_full_pipeline(project: str, description: str) -> None:
                 st.markdown(f"- ⚠️ {_label} 失败：{_e}")
         _bar.progress(_i / len(_steps), text=f"{_label} 完成")
     _bar.progress(1.0, text="全流程完成")
-    st.success("全流程生成完成，结果已归档到本项目。")
+    st.success(_t("全流程生成完成，结果已归档到本项目。", "Full pipeline finished; results archived to this project."))
     st.rerun()
 
 
@@ -3649,10 +3672,10 @@ def _page_projects() -> None:
     sync_projects_from_reports()
     _projects = list_projects()
     if not _projects:
-        st.info("还没有项目。到「威胁模型」页填写应用描述并生成一次，系统会自动创建项目。")
+        st.info(_t("还没有项目。到「威胁模型」页填写应用描述并生成一次，系统会自动创建项目。", "No projects yet. Generate a threat model once and the project is created automatically."))
         return
 
-    _sel = st.selectbox("选择项目", [p["name"] for p in _projects], key="ws_project")
+    _sel = st.selectbox(_t("选择项目", "Select project"), [p["name"] for p in _projects], key="ws_project")
     _proj = next((p for p in _projects if p["name"] == _sel), None)
     if not _proj:
         return
@@ -3660,10 +3683,10 @@ def _page_projects() -> None:
 
     _stats = threat_stats(_sel)
     _m1, _m2, _m3, _m4 = st.columns(4)
-    _m1.metric("产物数量", _proj.get("report_count", 0))
-    _m2.metric("威胁总数", _stats["total"])
-    _m3.metric("待处理", _stats["by_status"].get("待处理", 0))
-    _m4.metric("已修复", _stats["by_status"].get("已修复", 0))
+    _m1.metric(_t("产物数量", "Artifacts"), _proj.get("report_count", 0))
+    _m2.metric(_t("威胁总数", "Total threats"), _stats["total"])
+    _m3.metric(_t("待处理", "Open"), _stats["by_status"].get(_t("待处理", "Open"), 0))
+    _m4.metric(_t("已修复", "Fixed"), _stats["by_status"].get(_t("已修复", "Fixed"), 0))
 
     _tab_overview, _tab_register, _tab_board = st.tabs(["项目概览", "威胁台账", "风险看板"])
 
@@ -3683,46 +3706,114 @@ def _page_projects() -> None:
                 f" 消失 {_diff['removed_count']} · 未变 {_diff['unchanged_count']}"
             ):
                 if _diff["added"]:
-                    st.markdown("**新增威胁**")
+                    st.markdown(_t("**新增威胁**", "**New threats**"))
                     for _t in _diff["added"]:
                         st.markdown(f"- {_t.get('Threat Type', '')} · {_t.get('Scenario', '')}")
                 if _diff["removed"]:
-                    st.markdown("**已消失威胁**")
+                    st.markdown(_t("**已消失威胁**", "**Resolved threats**"))
                     for _t in _diff["removed"]:
                         st.markdown(f"- {_t.get('Threat Type', '')} · {_t.get('Scenario', '')}")
                 if not _diff["added"] and not _diff["removed"]:
-                    st.caption("两次威胁模型完全一致。")
+                    st.caption(_t("两次威胁模型完全一致。", "The two threat models are identical."))
         _desc = st.text_area(
-            "应用描述（用于分析与生成）",
+            _t("应用描述（用于分析与生成）", "Application description (used for analysis)"),
             value=_proj.get("description") or "",
             height=160,
             key=f"ws_desc_{_sel}",
         )
         _c1, _c2 = st.columns([1.2, 3])
         with _c1:
-            if st.button("保存描述", key="ws_save_desc", use_container_width=True):
+            if st.button(_t("保存描述", "Save description"), key="ws_save_desc", use_container_width=True):
                 update_project_description(_sel, _desc)
                 st.session_state["app_input"] = _desc
                 st.session_state["app_desc"] = _desc
                 st.session_state["project_name"] = _sel
-                st.success("已保存，并同步为当前分析输入。")
+                st.success(_t("已保存，并同步为当前分析输入。", "Saved and synced as the current analysis input."))
         with _c2:
-            st.caption("保存后，「威胁模型」页与一键全流程都会使用这段描述。")
-        if st.button("一键全流程生成", type="primary", key="ws_pipeline"):
+            st.caption(_t("保存后，「威胁模型」页与一键全流程都会使用这段描述。", "After saving, the Threat model page and the full pipeline use this description."))
+        if st.button(_t("一键全流程生成", "Run full pipeline"), type="primary", key="ws_pipeline"):
             _desc_effective = (_desc or _proj.get("description") or st.session_state.get("app_input") or "").strip()
-            store.log_action(st.session_state.get("user", ""), "一键全流程生成", _sel)
+            store.log_action(st.session_state.get("user", ""), _t("一键全流程生成", "Run full pipeline"), _sel)
             _run_full_pipeline(_sel, _desc_effective)
-        st.markdown("#### 产物")
+
+        st.markdown(_t("#### 定时自动分析", "#### Scheduled analysis"))
+        _sched = next((s for s in store.list_schedules() if s["project"] == _sel), None)
+        with st.container(border=True, key="ws_schedule"):
+            _sc1, _sc2, _sc3 = st.columns([1.3, 1.3, 2.4], vertical_alignment="bottom")
+            with _sc1:
+                _interval_h = st.number_input(
+                    "检查间隔（小时）",
+                    min_value=1,
+                    max_value=168,
+                    value=max(1, round((_sched or {}).get("interval_minutes", 1440) / 60)),
+                    key=f"ws_interval_{_sel}",
+                )
+            with _sc2:
+                _notify = st.checkbox(
+                    _t("威胁变化时推送 Webhook", "Push webhook on threat changes"),
+                    value=bool((_sched or {}).get("notify_on_change", 1)),
+                    key=f"ws_notify_{_sel}",
+                )
+            with _sc3:
+                _sb1, _sb2, _sb3, _sb4 = st.columns(4)
+                with _sb1:
+                    if st.button(_t("保存计划", "Save schedule"), key="ws_save_sched", use_container_width=True):
+                        store.add_schedule(_sel, int(_interval_h) * 60, _notify)
+                        store.log_action(
+                            st.session_state.get("user", ""), "保存定时计划", _sel
+                        )
+                        st.success(_t("计划已保存", "Schedule saved"))
+                        st.rerun()
+                with _sb2:
+                    if st.button(_t("立即执行", "Run now"), key="ws_run_sched", use_container_width=True):
+                        store.add_schedule(_sel, int(_interval_h) * 60, _notify)
+                        _cur = next(
+                            (s for s in store.list_schedules() if s["project"] == _sel), None
+                        )
+                        with st.spinner(_t("正在执行计划…", "Running schedule…")):
+                            _res = _generation.run_scheduled_analysis(_cur or {"project": _sel})
+                        store.log_action(
+                            st.session_state.get("user", ""), "手动执行定时计划", _sel
+                        )
+                        st.success(
+                            f"执行完成：{_res.get('status')}（新增 {_res.get('added', 0)} /"
+                            f" 消失 {_res.get('removed', 0)}）"
+                        )
+                        st.rerun()
+                with _sb3:
+                    if _sched and _sched["enabled"]:
+                        if st.button(_t("暂停", "Pause"), key="ws_pause_sched", use_container_width=True):
+                            store.update_schedule(_sched["id"], enabled=0)
+                            st.rerun()
+                    elif _sched and st.button(
+                        _t("启用", "Enable"), key="ws_resume_sched", use_container_width=True
+                    ):
+                        store.update_schedule(_sched["id"], enabled=1)
+                        st.rerun()
+                with _sb4:
+                    if _sched and st.button(_t("删除", "Delete"), key="ws_del_sched", use_container_width=True):
+                        store.delete_schedule(_sched["id"])
+                        st.rerun()
+            if _sched:
+                st.caption(
+                    f"上次执行：{_sched['last_run'] or '—'} · 状态：{_sched['last_status'] or '—'}"
+                    f" · {'已启用' if _sched['enabled'] else '已暂停'}"
+                )
+            else:
+                st.caption(
+                    _t("尚未配置计划。调度器进程：`uv run python -m apps.scheduler.main`（或外部 cron 调用 `--once`）。", "No schedule yet. Scheduler process: `uv run python -m apps.scheduler.main` (or external cron with `--once`).")
+                )
+        st.markdown(_t("#### 产物", "#### Artifacts"))
         _reports = list_reports(project=_sel, limit=100)
         if not _reports:
-            st.caption("暂无产物。点击上方按钮一键生成全套。")
+            st.caption(_t("暂无产物。点击上方按钮一键生成全套。", "No artifacts yet. Use the button above to generate the full set."))
         for _r in _reports:
             with st.expander(
-                f"{KIND_LABELS.get(_r['kind'], _r['kind'])} · {_r['created_at']} · {_r['model']}"
+                f"{_kind_label(_r['kind'])} · {_r['created_at']} · {_r['model']}"
             ):
                 st.markdown(_r["content_md"])
                 st.download_button(
-                    "下载 Markdown",
+                    _t("下载 Markdown", "Download Markdown"),
                     data=_r["content_md"],
                     file_name=f"report-{_r['id']}.md",
                     mime="text/markdown",
@@ -3732,19 +3823,19 @@ def _page_projects() -> None:
     with _tab_register:
         _threats = list_threats(project=_sel)
         if not _threats:
-            st.info("暂无威胁条目。生成一次威胁模型后会自动写入台账。")
+            st.info(_t("暂无威胁条目。生成一次威胁模型后会自动写入台账。", "No threats yet. They are written to the register after a threat model run."))
         else:
             _f1, _f2 = st.columns([2, 2])
             with _f1:
                 _status_filter = st.multiselect(
-                    "状态筛选",
+                    _t("状态筛选", "Filter by status"),
                     THREAT_STATUSES,
                     key=f"ws_status_{_sel}",
-                    placeholder="选择状态…",
+                    placeholder=_t("选择状态…", "Select status…"),
                 )
             with _f2:
                 _kw = st.text_input(
-                    "搜索", key=f"ws_kw_{_sel}", placeholder="场景 / 类型 / 负责人"
+                    _t("搜索", "Search"), key=f"ws_kw_{_sel}", placeholder=_t("场景 / 类型 / 负责人", "Scenario / type / owner")
                 )
             _rows = [
                 t
@@ -3756,7 +3847,7 @@ def _page_projects() -> None:
                     in ((t["scenario"] or "") + (t["threat_type"] or "") + (t["owner"] or "")).lower()
                 )
             ]
-            st.caption("每条威胁可单独设置状态、负责人与备注，改完点下方按钮保存。")
+            st.caption(_t("每条威胁可单独设置状态、负责人与备注，改完点下方按钮保存。", "Set status, owner and notes per threat, then save below."))
             for t in _rows:
                 with st.container(border=True):
                     _rc1, _rc2 = st.columns([3, 2], vertical_alignment="center")
@@ -3777,7 +3868,7 @@ def _page_projects() -> None:
                         _sc1, _sc2 = st.columns([1, 1])
                         with _sc1:
                             st.selectbox(
-                                "状态",
+                                _t("状态", "Status"),
                                 THREAT_STATUSES,
                                 index=(
                                     THREAT_STATUSES.index(t["status"])
@@ -3788,12 +3879,12 @@ def _page_projects() -> None:
                             )
                         with _sc2:
                             st.text_input(
-                                "负责人", value=t["owner"], key=f"th_owner_{t['id']}"
+                                _t("负责人", "Owner"), value=t["owner"], key=f"th_owner_{t['id']}"
                             )
-                        st.text_input("备注", value=t["note"], key=f"th_note_{t['id']}")
+                        st.text_input(_t("备注", "Notes"), value=t["note"], key=f"th_note_{t['id']}")
             _reg_c1, _reg_c2 = st.columns([1, 3])
             with _reg_c1:
-                if st.button("保存台账变更", type="primary", key="ws_save_threats"):
+                if st.button(_t("保存台账变更", "Save register changes"), type="primary", key="ws_save_threats"):
                     _edits = [
                         {
                             "id": t["id"],
@@ -3810,7 +3901,7 @@ def _page_projects() -> None:
                     st.success(f"已保存 {_n} 条变更。")
                     st.rerun()
             with _reg_c2:
-                if st.button("推送到 Webhook", key="ws_push_webhooks"):
+                if st.button(_t("推送到 Webhook", "Push to webhook"), key="ws_push_webhooks"):
                     _outcomes = _generation.push_webhooks(_sel, list_threats(project=_sel))
                     _ok = [o for o in _outcomes if o.get("ok")]
                     if _ok:
@@ -3827,18 +3918,18 @@ def _page_projects() -> None:
         _by_status = {k: v for k, v in _stats["by_status"].items() if v}
         _cc1, _cc2 = st.columns(2)
         with _cc1:
-            st.markdown("#### STRIDE 分布")
+            st.markdown(_t("#### STRIDE 分布", "#### STRIDE distribution"))
             if _by_type:
                 st.bar_chart({"数量": _by_type})
             else:
-                st.caption("暂无数据")
+                st.caption(_t("暂无数据", "No data yet"))
         with _cc2:
-            st.markdown("#### 台账状态分布")
+            st.markdown(_t("#### 台账状态分布", "#### Status distribution"))
             if _by_status:
                 st.bar_chart({"数量": _by_status})
             else:
-                st.caption("暂无数据")
-        st.markdown("#### 高风险 Top 10（按 DREAD 评分）")
+                st.caption(_t("暂无数据", "No data yet"))
+        st.markdown(_t("#### 高风险 Top 10（按 DREAD 评分）", "#### Top 10 risks (by DREAD score)"))
         _risky = sorted(
             [t for t in list_threats(project=_sel) if t["risk_score"] is not None],
             key=lambda t: -float(t["risk_score"]),
@@ -3856,37 +3947,37 @@ def _page_projects() -> None:
                 )
             st.markdown("\n".join(_lines))
         else:
-            st.caption("生成一次 DREAD 风险评估后，风险分会自动回填到台账。")
+            st.caption(_t("生成一次 DREAD 风险评估后，风险分会自动回填到台账。", "Risk scores are filled into the register after a DREAD assessment."))
 
 
 def _page_users() -> None:
     """用户与审计：账号管理（仅管理员）+ 操作审计日志。"""
     if not _is_admin():
-        st.warning("该页面仅管理员可用。")
+        st.warning(_t("该页面仅管理员可用。", "This page is available to administrators only."))
         return
 
-    st.markdown("#### 用户管理")
+    st.markdown(_t("#### 用户管理", "#### User management"))
     with st.container(border=True, key="users_manage"):
         _u1, _u2, _u3 = st.columns([2, 2, 1.4])
         with _u1:
-            _new_user = st.text_input("用户名", key="nu_name", placeholder="如：zhangsan")
+            _new_user = st.text_input(_t("用户名", "Username"), key="nu_name", placeholder=_t("如：zhangsan", "e.g. zhangsan"))
         with _u2:
             _new_pw = st.text_input(
-                "初始密码", type="password", key="nu_pw", placeholder="至少 6 位"
+                _t("初始密码", "Initial password"), type="password", key="nu_pw", placeholder=_t("至少 6 位", "At least 6 characters")
             )
         with _u3:
             _new_role = st.selectbox(
-                "角色",
+                _t("角色", "Role"),
                 ["user", "admin"],
                 key="nu_role",
                 format_func=lambda r: _ROLE_LABELS.get(r, r),
             )
-        if st.button("创建用户", key="create_user", use_container_width=True):
+        if st.button(_t("创建用户", "Create user"), key="create_user", use_container_width=True):
             try:
                 store.create_user(_new_user, _new_pw, _new_role)
                 store.log_action(
                     st.session_state.get("user", ""),
-                    "创建用户",
+                    _t("创建用户", "Create user"),
                     f"{_new_user}（{_new_role}）",
                 )
                 st.success(f"已创建用户 {_new_user}")
@@ -3908,24 +3999,24 @@ def _page_users() -> None:
                     f" 最近登录 {_u['last_login'] or '—'}</span>",
                     unsafe_allow_html=True,
                 )
-            with _uc2, st.popover("重置密码", use_container_width=True):
+            with _uc2, st.popover(_t("重置密码", "Reset password"), use_container_width=True):
                 _rp = st.text_input(
-                    "新密码", type="password", key=f"rp_{_u['username']}"
+                    _t("新密码", "New password"), type="password", key=f"rp_{_u['username']}"
                 )
-                if st.button("确认重置", key=f"rp_btn_{_u['username']}"):
+                if st.button(_t("确认重置", "Confirm reset"), key=f"rp_btn_{_u['username']}"):
                     try:
                         store.set_user_password(_u["username"], _rp)
                         store.log_action(
                             st.session_state.get("user", ""),
-                            "重置密码",
+                            _t("重置密码", "Reset password"),
                             _u["username"],
                         )
-                        st.success("已重置")
+                        st.success(_t("已重置", "Reset done"))
                     except ValueError as exc:
                         st.error(str(exc))
             with _uc3:
                 if st.button(
-                    "删除", key=f"del_user_{_u['username']}", use_container_width=True
+                    _t("删除", "Delete"), key=f"del_user_{_u['username']}", use_container_width=True
                 ):
                     store.delete_user(_u["username"])
                     store.log_action(
@@ -3933,11 +4024,11 @@ def _page_users() -> None:
                     )
                     st.rerun()
 
-    st.markdown("#### 审计日志")
-    _audit_filter = st.text_input("按用户筛选", key="audit_filter", placeholder="留空显示全部")
+    st.markdown(_t("#### 审计日志", "#### Audit log"))
+    _audit_filter = st.text_input(_t("按用户筛选", "Filter by user"), key="audit_filter", placeholder=_t("留空显示全部", "Empty shows all"))
     _logs = store.list_audit(limit=200, username=(_audit_filter or "").strip() or None)
     if not _logs:
-        st.caption("暂无审计记录。")
+        st.caption(_t("暂无审计记录。", "No audit records yet."))
         return
     _lines = [
         "| 时间 | 用户 | 操作 | 详情 |",
@@ -3954,43 +4045,43 @@ def _page_users() -> None:
 # ------------------ 页面路由（独立 URL） ------------------ #
 
 _PAGE_HEADERS = {
-    "威胁模型": ("THREAT MODEL", "威胁模型"),
-    "项目工作区": ("PROJECTS", "项目工作区"),
-    "攻击树": ("ATTACK TREE", "攻击树"),
-    "数据流图": ("DATA FLOW DIAGRAM", "数据流图"),
-    "缓解措施": ("MITIGATIONS", "缓解措施"),
-    "DREAD 风险评估": ("DREAD", "DREAD 风险评估"),
-    "测试用例": ("TEST CASES", "测试用例"),
-    "报告历史": ("REPORTS", "报告历史"),
-    "用户与审计": ("USERS & AUDIT", "用户与审计"),
+    _t("威胁模型", "Threat Model"): ("THREAT MODEL", _t("威胁模型", "Threat Model")),
+    _t("项目工作区", "Projects"): ("PROJECTS", _t("项目工作区", "Projects")),
+    _t("攻击树", "Attack Tree"): ("ATTACK TREE", _t("攻击树", "Attack Tree")),
+    _t("数据流图", "Data Flow Diagram"): ("DATA FLOW DIAGRAM", _t("数据流图", "Data Flow Diagram")),
+    _t("缓解措施", "Mitigations"): ("MITIGATIONS", _t("缓解措施", "Mitigations")),
+    _t("DREAD 风险评估", "DREAD Assessment"): ("DREAD", _t("DREAD 风险评估", "DREAD Assessment")),
+    _t("测试用例", "Test Cases"): ("TEST CASES", _t("测试用例", "Test Cases")),
+    _t("报告历史", "Report History"): ("REPORTS", _t("报告历史", "Report History")),
+    _t("用户与审计", "Users & Audit"): ("USERS & AUDIT", _t("用户与审计", "Users & Audit")),
 }
 
 # 六个页面注册为独立路由：每页有自己的地址（可刷新 / 收藏 / 分享）
 _PAGE_PAGES = {
-    "威胁模型": st.Page(_page_threat_model, title="威胁模型", url_path="threat-model", default=True),
-    "项目工作区": st.Page(_page_projects, title="项目工作区", url_path="projects"),
-    "攻击树": st.Page(_page_attack_tree, title="攻击树", url_path="attack-tree"),
-    "数据流图": st.Page(_page_data_flow, title="数据流图", url_path="data-flow-diagram"),
-    "缓解措施": st.Page(_page_mitigations, title="缓解措施", url_path="mitigations"),
-    "DREAD 风险评估": st.Page(_page_dread, title="DREAD 风险评估", url_path="dread"),
-    "测试用例": st.Page(_page_test_cases, title="测试用例", url_path="test-cases"),
-    "报告历史": st.Page(_page_reports, title="报告历史", url_path="reports"),
-    "用户与审计": st.Page(_page_users, title="用户与审计", url_path="users"),
+    _t("威胁模型", "Threat Model"): st.Page(_page_threat_model, title=_t("威胁模型", "Threat Model"), url_path="threat-model", default=True),
+    _t("项目工作区", "Projects"): st.Page(_page_projects, title=_t("项目工作区", "Projects"), url_path="projects"),
+    _t("攻击树", "Attack Tree"): st.Page(_page_attack_tree, title=_t("攻击树", "Attack Tree"), url_path="attack-tree"),
+    _t("数据流图", "Data Flow Diagram"): st.Page(_page_data_flow, title=_t("数据流图", "Data Flow Diagram"), url_path="data-flow-diagram"),
+    _t("缓解措施", "Mitigations"): st.Page(_page_mitigations, title=_t("缓解措施", "Mitigations"), url_path="mitigations"),
+    _t("DREAD 风险评估", "DREAD Assessment"): st.Page(_page_dread, title=_t("DREAD 风险评估", "DREAD Assessment"), url_path="dread"),
+    _t("测试用例", "Test Cases"): st.Page(_page_test_cases, title=_t("测试用例", "Test Cases"), url_path="test-cases"),
+    _t("报告历史", "Report History"): st.Page(_page_reports, title=_t("报告历史", "Report History"), url_path="reports"),
+    _t("用户与审计", "Users & Audit"): st.Page(_page_users, title=_t("用户与审计", "Users & Audit"), url_path="users"),
 }
 
 _pg = st.navigation(list(_PAGE_PAGES.values()), position="hidden")
 
 # 登录后跳转回进入前的深链目标
 _PATH_TO_TITLE = {
-    "threat-model": "威胁模型",
-    "projects": "项目工作区",
-    "attack-tree": "攻击树",
-    "data-flow-diagram": "数据流图",
-    "mitigations": "缓解措施",
-    "dread": "DREAD 风险评估",
-    "test-cases": "测试用例",
-    "reports": "报告历史",
-    "users": "用户与审计",
+    "threat-model": _t("威胁模型", "Threat Model"),
+    "projects": _t("项目工作区", "Projects"),
+    "attack-tree": _t("攻击树", "Attack Tree"),
+    "data-flow-diagram": _t("数据流图", "Data Flow Diagram"),
+    "mitigations": _t("缓解措施", "Mitigations"),
+    "dread": _t("DREAD 风险评估", "DREAD Assessment"),
+    "test-cases": _t("测试用例", "Test Cases"),
+    "reports": _t("报告历史", "Report History"),
+    "users": _t("用户与审计", "Users & Audit"),
 }
 _pending_path = st.session_state.pop("_pending_path", None)
 if _pending_path:
@@ -4012,7 +4103,7 @@ _nav = st.segmented_control(
 if _nav and _nav != _pg.title:
     st.switch_page(_PAGE_PAGES[_nav])
 
-_kicker, _title = _PAGE_HEADERS.get(_pg.title, _PAGE_HEADERS["威胁模型"])
+_kicker, _title = _PAGE_HEADERS.get(_pg.title, _PAGE_HEADERS[_t("威胁模型", "Threat Model")])
 st.markdown(
     f"""
     <div class="sg-page-head">

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 _APPS_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _APPS_DIR.parent
@@ -90,6 +91,12 @@ class ThreatPatch(BaseModel):
     note: str | None = None
 
 
+class ScheduleCreate(BaseModel):
+    project: str
+    interval_minutes: int = Field(default=1440, ge=5, description="检查间隔（分钟）")
+    notify_on_change: bool = Field(default=True, description="威胁变化时推送 Webhook")
+
+
 class WebhookCreate(BaseModel):
     name: str
     url: str
@@ -103,6 +110,16 @@ def _project_name(req: GenerateRequest | FullPipelineRequest) -> str:
 
 def _settings(req) -> dict:
     return generation.resolve_model_settings({"provider": req.provider, "model": req.model})
+
+
+def _attachment_headers(filename: str, fallback: str) -> dict:
+    """Content-Disposition：ASCII 回退名 + RFC 5987 的 UTF-8 文件名。"""
+
+    return {
+        "Content-Disposition": (
+            f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename)}"
+        )
+    }
 
 
 def _latest_threats_md(project: str) -> str:
@@ -268,6 +285,45 @@ def api_delete_report(report_id: int, api_key_name: str = Depends(require_api_ke
     return {"ok": True, "deleted": report_id}
 
 
+@app.get("/api/v1/reports/{report_id}/docx", summary="导出报告为 Word")
+def api_report_docx(report_id: int, api_key_name: str = Depends(require_api_key)):
+    row = store.get_report(report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    from common import exporters
+    from fastapi import Response
+
+    data = exporters.markdown_to_docx(row)
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers=_attachment_headers(
+            exporters.suggested_filename(row, "docx"), f"report-{row['id']}.docx"
+        ),
+    )
+
+
+@app.get("/api/v1/reports/{report_id}/pdf", summary="导出报告为 PDF（需服务端安装 Chrome）")
+def api_report_pdf(report_id: int, api_key_name: str = Depends(require_api_key)):
+    row = store.get_report(report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    from common import exporters
+    from fastapi import Response
+
+    try:
+        data = exporters.report_to_pdf(row)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers=_attachment_headers(
+            exporters.suggested_filename(row, "pdf"), f"report-{row['id']}.pdf"
+        ),
+    )
+
+
 @app.get("/api/v1/reports/{report_id}/sarif", summary="导出报告为 SARIF（仅威胁模型）")
 def api_report_sarif(report_id: int, api_key_name: str = Depends(require_api_key)) -> dict:
     row = store.get_report(report_id)
@@ -347,6 +403,37 @@ def api_push_webhooks(name: str, api_key_name: str = Depends(require_api_key)) -
         raise HTTPException(status_code=400, detail="该项目暂无威胁条目")
     outcomes = generation.push_webhooks(name, threats)
     return {"ok": all(o.get("ok") for o in outcomes), "outcomes": outcomes}
+
+
+# ---------------------------------------------------------------------------
+# 定时分析计划
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/v1/schedules", summary="定时分析计划列表")
+def api_list_schedules(api_key_name: str = Depends(require_api_key)) -> dict:
+    return {"ok": True, "schedules": store.list_schedules()}
+
+
+@app.post("/api/v1/schedules", summary="创建或启用定时分析计划")
+def api_add_schedule(body: ScheduleCreate, api_key_name: str = Depends(require_api_key)) -> dict:
+    schedule_id = store.add_schedule(body.project, body.interval_minutes, body.notify_on_change)
+    return {"ok": True, "schedule_id": schedule_id}
+
+
+@app.delete("/api/v1/schedules/{schedule_id}", summary="删除定时分析计划")
+def api_delete_schedule(schedule_id: int, api_key_name: str = Depends(require_api_key)) -> dict:
+    store.delete_schedule(schedule_id)
+    return {"ok": True, "deleted": schedule_id}
+
+
+@app.post("/api/v1/schedules/{schedule_id}/run", summary="立即执行一次计划")
+def api_run_schedule(schedule_id: int, api_key_name: str = Depends(require_api_key)) -> dict:
+    schedule = store.get_schedule(schedule_id)
+    if not schedule:
+        raise HTTPException(status_code=404, detail="计划不存在")
+    result = generation.run_scheduled_analysis(schedule)
+    return {"ok": result.get("status") == "ok", **result}
 
 
 # ---------------------------------------------------------------------------

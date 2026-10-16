@@ -449,3 +449,86 @@ def apply_policies() -> dict:
     else:
         set_prompt_scrubber(None)
     return {"baseline": bool(baseline), "scrubbing": bool(saved.get("scrub_enabled", True))}
+
+
+# ---------------------------------------------------------------------------
+# 定时分析 / 变化通知
+# ---------------------------------------------------------------------------
+
+
+def push_text(title: str, text: str, webhooks: list[dict] | None = None) -> list[dict]:
+    """推送纯文本通知（用于威胁变化告警）。"""
+    hooks = webhooks if webhooks is not None else store.list_webhooks()
+    outcomes = []
+    for hook in hooks:
+        if not hook.get("enabled", True) or not hook.get("url"):
+            continue
+        payload = store.text_webhook_payload(hook.get("kind") or "generic", title, text)
+        try:
+            resp = httpx.post(hook["url"], json=payload, timeout=10)
+            outcomes.append(
+                {"name": hook.get("name"), "ok": resp.status_code < 400, "status": resp.status_code}
+            )
+        except Exception as exc:
+            outcomes.append({"name": hook.get("name"), "ok": False, "error": str(exc)})
+    return outcomes
+
+
+def run_scheduled_analysis(schedule: dict) -> dict:
+    """执行一条定时计划的完整流程，并在威胁变化时推送通知。"""
+    project = schedule.get("project") or ""
+    result: dict = {"project": project, "status": "failed", "added": 0, "removed": 0, "pushed": 0}
+    try:
+        project_info = store.get_project(project) or {}
+        description = (project_info.get("description") or "").strip()
+        if not description:
+            result["status"] = "skipped"
+            result["error"] = "项目缺少应用描述"
+            store.update_schedule(
+                schedule["id"], last_run=store._now(), last_status="skipped: 缺少应用描述"
+            )
+            return result
+
+        settings = resolve_model_settings()
+        steps = run_full_pipeline(
+            description=description,
+            profile={"app_type": "Web application"},
+            project=project,
+            settings=settings,
+        )
+        ok_count = sum(1 for s in steps if s.get("ok"))
+        result["steps_ok"] = ok_count
+        result["steps_total"] = len(steps)
+
+        diff = diff_latest_threat_models(project)
+        if diff:
+            result["added"] = diff["added_count"]
+            result["removed"] = diff["removed_count"]
+
+        if schedule.get("notify_on_change", 1) and (result["added"] or result["removed"]):
+            lines = [
+                f"项目：{project}",
+                f"新增威胁 {result['added']} 条 / 消失 {result['removed']} 条",
+            ]
+            lines.extend(
+                f"＋ [{t.get('Threat Type')}] {t.get('Scenario')}"
+                for t in (diff["added"][:10] if diff else [])
+            )
+            lines.extend(
+                f"－ [{t.get('Threat Type')}] {t.get('Scenario')}"
+                for t in (diff["removed"][:10] if diff else [])
+            )
+            outcomes = push_text("威云-风险建模智能体：威胁变化", "\n".join(lines))
+            result["pushed"] = sum(1 for o in outcomes if o.get("ok"))
+
+        result["status"] = "ok" if ok_count == len(steps) else "partial"
+        store.update_schedule(
+            schedule["id"],
+            last_run=store._now(),
+            last_status=f"{result['status']}（{ok_count}/{len(steps)} 步，"
+            f"新增 {result['added']} / 消失 {result['removed']}）",
+        )
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        store.update_schedule(schedule["id"], last_run=store._now(), last_status=f"failed: {exc}")
+    return result

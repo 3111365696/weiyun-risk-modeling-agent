@@ -186,3 +186,33 @@ uv run streamlit run apps/web/main.py     # 默认 http://localhost:8501
 - `uv run ruff check apps/ tests/`：全绿
 - 浏览器实测：管理员建/看/删用户、普通用户登录后无配置入口且 `/users` 被拒、覆盖度与差异卡片、审计记录完整
 - API 实测：`/coverage`、`/diff`、404 错误路径；测试 Key 已吊销
+
+## 增量记录（2026-10-17）：P4 自动化 / 报告模板 / 多语言
+
+### 定时自动分析
+- `schedules` 表 + 计划 CRUD/到期判定（`due_schedules`）
+- `generation.run_scheduled_analysis()`：执行全流程 → 对比最近两次威胁模型 → 变化时推送 Webhook → 记录 last_run/status
+- 独立调度进程 `apps/scheduler/main.py`（常驻，或 `--once` 供外部 cron）+ `scripts/run_scheduler.sh`
+- 项目工作区新增「定时自动分析」卡片（间隔/推送开关/保存/立即执行/暂停/删除/状态）
+- API：`/schedules` 列表/创建/删除/立即执行；`/projects/{name}/coverage`、`/diff`
+
+### 报告模板（Word/PDF）
+- `apps/common/exporters.py`：Markdown → Word（python-docx；标题页 + 元信息表 + 表格/列表/代码块 + 页脚页码）；HTML → PDF（Chrome 无头打印）
+- 模板可配置：报告抬头（品牌）、页脚保密标识（系统配置 → 报告模板）
+- Web 报告弹窗：下载 Word / 生成并下载 PDF；API：`/reports/{id}/docx|pdf`（RFC 5987 中文文件名）
+
+### 多语言切换
+- `apps/common/i18n.py`：`t(zh, en)` + `set_language()`（默认中文，未知语言回退）
+- main.py 345 处 UI 文案改为 `_t(...)`；导航/页面标题、按钮/表单/设置/报告/台账/用户页全覆盖
+- 报告类型标签、角色名、下拉显示值（应用类型/敏感级别/是否联网/认证方式）运行时按语言切换
+- 侧边栏「界面语言 / Language」切换并持久化到服务端配置
+
+### 修复
+- 中文文件名写入 HTTP 头导致 latin-1 编码 500 → RFC 5987（`filename*=UTF-8''...`）
+- 会话 cookie 与登出竞态 → 会话纪元机制（P3 已记，本期回归验证）
+
+### 验证
+- `uv run pytest`：**859 passed**（新增 9 个 P4 测试：计划 CRUD/到期/执行通知、Word 模板与页脚、i18n 切换、通知体格式）
+- `ruff check apps/ tests/`：全绿
+- 浏览器实测：切到 English 后导航/页面/侧边栏/子标签/角色/按钮全英文，切回中文正常
+- API 实测：Word/PDF 下载（正确 magic 与文件名编码）、覆盖度、差异、调度 CRUD

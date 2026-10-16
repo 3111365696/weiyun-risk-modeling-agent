@@ -163,3 +163,33 @@ jobs:
 | 401 | API Key 缺失、无效或已吊销 |
 | 404 | 报告/条目不存在 |
 | 502 | 上游模型调用失败（网络、额度、模型返回异常） |
+
+## 新增端点（P2/P3/P4）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/reports/{id}/docx` | 导出 Word（模板：抬头/页脚可在系统配置中设置） |
+| GET | `/api/v1/reports/{id}/pdf` | 导出 PDF（服务端需安装 Chrome/Chromium） |
+| GET | `/api/v1/projects/{name}/coverage` | STRIDE 覆盖度（最近一次威胁模型） |
+| GET | `/api/v1/projects/{name}/diff` | 最近两次威胁模型差异（drift） |
+| GET | `/api/v1/schedules` | 定时分析计划列表 |
+| POST | `/api/v1/schedules` | 创建/启用计划（project、interval_minutes、notify_on_change） |
+| DELETE | `/api/v1/schedules/{id}` | 删除计划 |
+| POST | `/api/v1/schedules/{id}/run` | 立即执行一次 |
+
+示例：
+
+```bash
+# 导出 Word / PDF
+curl -sS -OJ "http://localhost:8000/api/v1/reports/12/docx" -H "X-API-Key: $WY_API_KEY"
+curl -sS -OJ "http://localhost:8000/api/v1/reports/12/pdf"  -H "X-API-Key: $WY_API_KEY"
+
+# 覆盖度与差异
+curl -sS "http://localhost:8000/api/v1/projects/订单系统/coverage" -H "X-API-Key: $WY_API_KEY"
+curl -sS "http://localhost:8000/api/v1/projects/订单系统/diff"     -H "X-API-Key: $WY_API_KEY"
+
+# 定时计划
+curl -sS -X POST "http://localhost:8000/api/v1/schedules" -H "X-API-Key: $WY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"project":"订单系统","interval_minutes":1440,"notify_on_change":true}'
+```
