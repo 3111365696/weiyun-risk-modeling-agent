@@ -161,4 +161,5 @@ class TestMainPageGuard:
             )
         assert 'guard_block("settings")' in source
         assert 'guard_block("system-status")' in source
-        assert "from error_boundary import guard, guard_block" in source
+        shared = (ROOT / "apps" / "web" / "shared.py").read_text(encoding="utf-8")
+        assert "from error_boundary import guard, guard_block" in shared

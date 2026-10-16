@@ -417,3 +417,15 @@ Python 看到函数内存在对 `_t` 的赋值就把它当作局部变量，于�
   最近告警（结构化日志 WARNING+）、一键生成并下载备份 + 最近备份 + CLI 提示
 - `/api/v1/health` 增强：返回数据库自检结果与运行时长（探针可用）
 - 新增 24 个测试（备份 16 + 状态页 8）；全量 1012 passed，ruff 全绿
+
+### P7-6 拆分 main.py（5027 行 → 434 行）
+- 结构：`main.py`（启动装配：环境准备 → 配置加载 → set_page_config → 主题 → 登录门 →
+  侧边栏/顶栏 → 页面路由）+ `shared.py`（公共导入/常量/会话读取）+ `widgets.py`
+  （引导式描述、GitHub 仓库、架构图、Mermaid 等交互组件）+ `services.py`（报告归档与生成流程）
+  + `auth.py`（登录/会话 Cookie/退出/模型回调）+ `theme.py`（CSS）+ `pages/*.py`（13 个页面）
+- 会话快照改为动态读取：原先页面函数读模块级快照（`model_provider = st.session_state...`），
+  拆分后会读到旧值；改为 `shared._state("model_provider")`，跨 rerun 不过期
+- 拆分由 AST 脚本完成：函数体逐字搬运（含装饰器）、自动计算 import、避免页面反向依赖 main
+- 防回归：`test_web_static.py` 增加「main.py < 700 行」「页面不得 import main」
+  「名字遮蔽检查覆盖 apps/web 全部模块」
+- 验证：13/13 页面逐页渲染通过（AppTest 探针）、1014 passed、ruff 全绿
