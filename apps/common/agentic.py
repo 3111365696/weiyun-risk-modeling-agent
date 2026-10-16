@@ -23,6 +23,7 @@ from stride_gpt.agent.report import render_json, render_markdown, render_sarif
 from stride_gpt.core.schemas import ModelPair
 
 from . import scanners as _scanners
+from . import standards as _standards
 from . import store
 from .generation import build_llm_config, resolve_model_settings
 
@@ -328,7 +329,9 @@ def archive_report(
         for finding in report.findings
         for threat in finding.threats
     ]
-    inserted = store.add_threats(project, report_id, threats, source="agentic")
+    inserted = store.add_threats(
+        project, report_id, _standards.annotate_threats(threats), source="agentic"
+    )
     return {
         "report_id": report_id,
         "markdown": markdown,

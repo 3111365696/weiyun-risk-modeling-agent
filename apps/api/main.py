@@ -137,6 +137,20 @@ def _attachment_headers(filename: str, fallback: str) -> dict:
     }
 
 
+def _report_threats(row: dict) -> list[dict]:
+    """从报告 JSON 里取威胁列表（兼容威胁模型与代码审计两种结构）。"""
+    try:
+        data = json.loads(row.get("content_json") or "{}")
+    except Exception:
+        return []
+    threats = list(data.get("threat_model") or [])
+    if threats:
+        return threats
+    return [
+        t for finding in (data.get("findings") or []) for t in (finding.get("threats") or [])
+    ]
+
+
 def _latest_threats_md(project: str) -> str:
     rows = store.list_reports(project=project, kind="threat_model", limit=1)
     if not rows:
@@ -315,6 +329,32 @@ def api_delete_report(report_id: int, api_key_name: str = Depends(require_api_ke
         raise HTTPException(status_code=404, detail="报告不存在")
     store.delete_report(report_id)
     return {"ok": True, "deleted": report_id}
+
+
+@app.get("/api/v1/reports/{report_id}/threat-dragon", summary="导出为 Threat Dragon 模型")
+def api_report_threat_dragon(report_id: int, api_key_name: str = Depends(require_api_key)) -> dict:
+    row = store.get_report(report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    if row["kind"] not in ("threat_model", "code_analysis"):
+        raise HTTPException(status_code=400, detail="仅威胁模型 / 代码审计报告支持导出")
+    from common import interop
+
+    return interop.to_threat_dragon(row.get("project") or "", _report_threats(row), description="")
+
+
+@app.get("/api/v1/reports/{report_id}/stix", summary="导出报告为 STIX 2.1")
+def api_report_stix(report_id: int, api_key_name: str = Depends(require_api_key)) -> dict:
+    row = store.get_report(report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    if row["kind"] not in ("threat_model", "code_analysis"):
+        raise HTTPException(status_code=400, detail="仅威胁模型 / 代码审计报告支持 STIX 导出")
+    from common import standards
+
+    return standards.threats_to_stix(
+        _report_threats(row), project=row.get("project") or "", description=""
+    )
 
 
 @app.get("/api/v1/reports/{report_id}/docx", summary="导出报告为 Word")

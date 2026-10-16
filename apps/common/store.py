@@ -305,6 +305,7 @@ def init_db() -> None:
         _ensure_column(c, "threats", "subsystem", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(c, "threats", "source", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(c, "threats", "evidence", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(c, "threats", "cwe", "TEXT NOT NULL DEFAULT ''")
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -630,8 +631,8 @@ def add_threats(
                 INSERT INTO threats
                     (project, report_id, threat_type, scenario, impact, owasp_llm, owasp_asi,
                      mitre, insider, status, created_at, updated_at, fingerprint,
-                     subsystem, source, evidence)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '待处理', ?, ?, ?, ?, ?, ?)
+                     subsystem, source, evidence, cwe)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '待处理', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project,
@@ -649,6 +650,9 @@ def add_threats(
                     str(t.get("subsystem") or "").strip(),
                     str(t.get("source") or source or "").strip(),
                     json.dumps(evidence, ensure_ascii=False)[:20000] if evidence else "",
+                    ", ".join(str(x) for x in (t.get("CWE") or t.get("cwe") or []))
+                    if isinstance(t.get("CWE") or t.get("cwe"), list)
+                    else str(t.get("CWE") or t.get("cwe") or ""),
                 ),
             )
             inserted += 1

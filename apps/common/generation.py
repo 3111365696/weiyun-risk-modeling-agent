@@ -24,6 +24,7 @@ from stride_gpt.core.test_cases import generate_test_cases
 from stride_gpt.core.threat_model import generate_threat_model
 from stride_gpt.models import PROVIDERS, get_models_for_provider
 
+from . import standards as _standards
 from . import store
 from . import usage as _usage
 from .text import (
@@ -197,7 +198,11 @@ def archive_result(
     )
     store.upsert_project(project, description)
     if kind == "threat_model" and isinstance(content_json, dict):
-        store.add_threats(project, report_id, list(content_json.get("threat_model") or []))
+        store.add_threats(
+            project,
+            report_id,
+            _standards.annotate_threats(list(content_json.get("threat_model") or [])),
+        )
     if kind == "dread" and isinstance(content_json, dict):
         store.apply_dread_scores(project, content_json)
     return report_id
@@ -313,6 +318,9 @@ def threat_model_to_sarif(
             "properties": {"stride": ttype},
         }
         props = result["properties"]
+        cwes = _standards.threat_cwe(threat)
+        if cwes:
+            props["cwe"] = cwes
         if threat.get("OWASP_LLM"):
             props["owasp_llm"] = threat["OWASP_LLM"]
         if threat.get("OWASP_ASI"):

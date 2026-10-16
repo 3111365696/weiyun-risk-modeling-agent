@@ -320,3 +320,30 @@ Python 看到函数内存在对 `_t` 的赋值就把它当作局部变量，于�
 - 新增 10 个扫描器测试（探测/内置规则命中/干净代码零命中/去重排序/提示词截断/规则包校验）
 - 端到端：含漏洞的 ZIP → 扫描得 10 条线索（semgrep 5 + bandit 5，高危 5）→ 注入 agent →
   报告含线索附录 + 2 条带证据威胁入库
+
+## 增量记录（2026-10-17）：C/A 阶段 标准映射与开源工具互通
+
+### C：CWE 映射 + STIX 2.1 导出（`apps/common/standards.py`）
+- 威胁自动关联 CWE：16 组关键词规则（SQLi→CWE-89、XSS→CWE-79、命令注入→CWE-78、
+  反序列化→CWE-502、路径穿越→CWE-22、硬编码凭据→CWE-798、JWT→CWE-347 等），
+  未命中则按 STRIDE 类别回退（S→287、T→345、R→778、I→200、D→400、E→269），每条最多 3 个
+- 归档路径统一注解：威胁模型归档、agentic 代码审计归档 → 入库 `threats.cwe`（新增列 + 自动迁移）
+- SARIF 输出附 `properties.cwe`；威胁台账标签行展示 CWE
+- **STIX 2.1 导出**：identity（本系统）+ 每条威胁一个 vulnerability（含 CWE/ATT&CK 外部引用）
+  + report 聚合；ID 用 uuid5 确定性生成，便于多次导入去重
+- 端点：`GET /api/v1/reports/{id}/stix`；报告弹窗新增「下载 STIX」
+
+### A：Threat Dragon 互通（`apps/common/interop.py`）
+- 导出：威胁 → Threat Dragon v2 模型 JSON（severity 由 DREAD 分数 / 验证结论推断，
+  threats 挂在模型级），可直接在 Threat Dragon 里继续编辑、分配负责人、画数据流图
+- 导入：解析 Threat Dragon 模型（标题/描述/图内组件/信任边界/已有威胁）生成结构化描述，
+  作为威胁模型或代码审计的分析输入（已有威胁作为基线，避免重复识别）
+- 入口：威胁模型页新增「导入外部模型（Threat Dragon JSON）」；
+  报告弹窗新增「下载 Threat Dragon」；端点 `GET /api/v1/reports/{id}/threat-dragon`
+- 不做的事（有意为之）：pytm 模型需要执行 Python 代码（RCE 风险，不执行）；
+  Threagile 无 findings 导入能力，暂不接入
+
+### 验证
+- 新增 35 个测试（CWE 规则/回退/注释不可变性、STIX 结构与确定性 ID、Threat Dragon 往返导入、
+  cwe 入库持久化、API 端点与错误码）
+- 全量 937 passed，ruff 全绿；API 已重启，新端点在线

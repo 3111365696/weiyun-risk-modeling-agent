@@ -46,7 +46,9 @@ from common import agentic as _agentic
 from common import exporters as _exporters
 from common import generation as _generation
 from common import i18n as _i18n
+from common import interop as _interop
 from common import scanners as _scanners
+from common import standards as _standards
 from common import store
 from common import usage as _usage
 
@@ -2228,6 +2230,29 @@ def _page_threat_model() -> None:
         st.caption(
             _t("在下方描述你的应用。想快速起步，可从以下来源自动生成草稿：GitHub 仓库、上传的架构图、内置编辑器中绘制的图，或引导式构建器。生成后请检查并编辑。", "Describe your application below. To get a head start, auto-generate a draft from a GitHub repo, an uploaded diagram, a diagram drawn in the built-in editor, or the guided builder.")
         )
+        with st.expander(
+            _t("导入外部模型（Threat Dragon JSON）", "Import external model (Threat Dragon JSON)"),
+            expanded=False,
+        ):
+            _td_file = st.file_uploader(
+                _t("上传 Threat Dragon 模型", "Upload Threat Dragon model"),
+                type=["json"],
+                key="td_import_file",
+            )
+            if _td_file is not None and st.button(
+                _t("导入为应用描述", "Import as description"), key="td_import_apply"
+            ):
+                try:
+                    _td_desc = _interop.from_threat_dragon(
+                        json.loads(_td_file.getvalue().decode("utf-8"))
+                    )
+                    st.session_state["app_input"] = _td_desc
+                    st.session_state["app_desc"] = _td_desc
+                    st.session_state["_sync_app_desc"] = True
+                    st.success(_t("已导入，可在下方继续编辑", "Imported — edit below"))
+                    st.rerun()
+                except Exception as _td_exc:
+                    st.error(_t("导入失败：", "Import failed: ") + str(_td_exc))
         _gh_tab, _img_tab, _draw_tab, _guided_tab = st.tabs(
             [
                 _t("GitHub 仓库", "GitHub repo"),
@@ -3448,6 +3473,35 @@ def _report_dialog(report: dict) -> None:
                 use_container_width=True,
             )
     with _d4:
+        if report.get("kind") in ("threat_model", "code_analysis") and report.get("content_json"):
+            import json as _json
+
+            try:
+                _raw = _json.loads(report["content_json"])
+                _threats = list(_raw.get("threat_model") or [])
+                if not _threats:
+                    _threats = [
+                        _t
+                        for _f in (_raw.get("findings") or [])
+                        for _t in (_f.get("threats") or [])
+                    ]
+            except Exception:
+                _threats = []
+            if _threats:
+                st.download_button(
+                    _t("下载 STIX", "Download STIX"),
+                    data=_json.dumps(
+                        _standards.threats_to_stix(
+                            _threats, project=report.get("project") or "", description=""
+                        ),
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    file_name=f"report-{report['id']}.stix.json",
+                    mime="application/json",
+                    key=f"dlg_stix_{report['id']}",
+                    use_container_width=True,
+                )
         if report.get("kind") == "threat_model" and report.get("content_json"):
             import json as _json
 
@@ -3455,6 +3509,18 @@ def _report_dialog(report: dict) -> None:
                 _tm = _json.loads(report["content_json"]).get("threat_model") or []
             except Exception:
                 _tm = []
+            st.download_button(
+                _t("下载 Threat Dragon", "Download Threat Dragon"),
+                data=_json.dumps(
+                    _interop.to_threat_dragon(report.get("project") or "", _tm),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                file_name=f"report-{report['id']}.threat-dragon.json",
+                mime="application/json",
+                key=f"dlg_td_{report['id']}",
+                use_container_width=True,
+            )
             st.download_button(
                 _t("下载 SARIF", "Download SARIF"),
                 data=_json.dumps(
@@ -3993,7 +4059,9 @@ def _page_projects() -> None:
                     with _rc1:
                         _score = f"{float(t['risk_score']):.2f}" if t["risk_score"] is not None else "—"
                         _tags = " · ".join(
-                            x for x in [t["owasp_llm"], t["owasp_asi"], t["mitre"]] if x
+                            x
+                            for x in [t["owasp_llm"], t["owasp_asi"], t["mitre"], t.get("cwe")]
+                            if x
                         )
                         _verdict = t.get("verdict") or _t("未验证", "Unverified")
                         _conf = t.get("confidence") or ""
