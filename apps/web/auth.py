@@ -111,18 +111,54 @@ def render_login() -> None:
                 submitted = st.form_submit_button(
                     _t("登 录", "Sign in"), use_container_width=True, type="primary"
                 )
+            _identifier = (username or "").strip() or "未知用户"
+            _lock = store.login_lock_status(_identifier)
+            if _lock["locked"]:
+                st.error(
+                    _t(
+                        f"失败次数过多，已临时锁定；请 {_lock['minutes']} 分钟后重试。",
+                        f"Too many failed attempts — temporarily locked. Retry in {_lock['minutes']} minute(s).",
+                    )
+                )
             if submitted:
-                _account = _authenticate(username, password)
-                if _account:
-                    st.session_state["authenticated"] = True
-                    st.session_state["user"] = _account["username"]
-                    st.session_state["role"] = _account["role"]
-                    st.session_state["login_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    store.log_action(_account["username"], "登录", "密码登录")
-                    st.rerun()
+                if _lock["locked"]:
+                    store.log_action(_identifier, "登录被拒", "账号处于锁定状态")
                 else:
-                    store.log_action(username or "未知用户", "登录失败", "用户名或密码错误")
-                    st.error(_t("用户名或密码错误，请重试", "Incorrect username or password, please retry"))
+                    _account = _authenticate(username, password)
+                    if _account:
+                        store.clear_login_failures(_identifier)
+                        st.session_state["authenticated"] = True
+                        st.session_state["user"] = _account["username"]
+                        st.session_state["role"] = _account["role"]
+                        st.session_state["login_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        store.log_action(_account["username"], "登录", "密码登录")
+                        st.rerun()
+                    else:
+                        _after = store.record_login_failure(_identifier)
+                        store.log_action(
+                            _identifier,
+                            "登录失败",
+                            f"第 {_after['fails']} 次"
+                            + ("（已锁定）" if _after["locked"] else ""),
+                        )
+                        if _after["locked"]:
+                            st.error(
+                                _t(
+                                    f"用户名或密码错误；失败次数过多，已锁定 {_after['minutes']} 分钟。",
+                                    f"Incorrect credentials; too many failures — locked for {_after['minutes']} minute(s).",
+                                )
+                            )
+                        elif _after["fails_left"] <= 2:
+                            st.warning(
+                                _t(
+                                    f"用户名或密码错误；再失败 {_after['fails_left']} 次将临时锁定。",
+                                    f"Incorrect credentials; {_after['fails_left']} attempt(s) left before a temporary lock.",
+                                )
+                            )
+                        else:
+                            st.error(
+                                _t("用户名或密码错误，请重试", "Incorrect username or password, please retry")
+                            )
             st.markdown(
                 _t("<div class=\"sg-card-foot\">仅限授权人员访问 · 登录行为将被记录</div>", "<div class=\"sg-card-foot\">Authorized personnel only · Login activity is recorded</div>"),
                 unsafe_allow_html=True,
@@ -182,11 +218,17 @@ def _logout_dialog() -> None:
 
 
 def _cookie_js(token: str, *, clear: bool = False) -> str:
-    """通过 iframe 在父页面写入/清除会话 cookie。"""
+    """通过 iframe 在父页面写入/清除会话 cookie。
+
+    有效期可在「系统配置 → 安全策略」调整；HTTPS 部署时设置
+    STRIDE_GPT_SECURE_COOKIE=1 会追加 Secure 标记。
+    """
+    _secure = "; Secure" if store.secure_cookie() else ""
     if clear:
-        cookie = f"{SESSION_COOKIE}=; path=/; max-age=0"
+        cookie = f"{SESSION_COOKIE}=; path=/; max-age=0; SameSite=Lax{_secure}"
     else:
-        cookie = f"{SESSION_COOKIE}={token}; path=/; max-age={7 * 86400}; SameSite=Lax"
+        _max_age = store.session_days() * 86400
+        cookie = f"{SESSION_COOKIE}={token}; path=/; max-age={_max_age}; SameSite=Lax{_secure}"
     return f'<script>try {{ window.parent.document.cookie = "{cookie}"; }} catch (e) {{}}</script>'
 
 

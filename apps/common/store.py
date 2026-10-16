@@ -20,7 +20,7 @@ import sqlite3
 import time
 import zipfile
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DATA_DIR = Path.home() / ".stride-gpt"
@@ -332,6 +332,16 @@ def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT '',
                 started_at TEXT NOT NULL DEFAULT '',
                 finished_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                identifier TEXT PRIMARY KEY,
+                fails INTEGER NOT NULL DEFAULT 0,
+                first_fail_at TEXT NOT NULL DEFAULT '',
+                locked_until TEXT NOT NULL DEFAULT ''
             )
             """
         )
@@ -1084,8 +1094,9 @@ def create_user(username: str, password: str, role: str = "user") -> None:
     username = (username or "").strip()
     if not username:
         raise ValueError("用户名不能为空")
-    if len(password or "") < 6:
-        raise ValueError("密码至少 6 位")
+    _issues = validate_password(username, password)
+    if _issues:
+        raise ValueError("密码不符合策略：" + ", ".join(_issues))
     if role not in ROLES:
         raise ValueError(f"角色必须是 {ROLES}")
     init_db()
@@ -1143,8 +1154,12 @@ def delete_user(username: str) -> None:
 
 
 def set_user_password(username: str, password: str) -> None:
-    if len(password or "") < 6:
-        raise ValueError("密码至少 6 位")
+    """管理员重置或用户修改密码（改动后旧会话立即失效）。"""
+    if not get_user(username):
+        raise ValueError(f"用户「{username}」不存在")
+    _issues = validate_password(username, password)
+    if _issues:
+        raise ValueError("密码不符合策略：" + ", ".join(_issues))
     pw_hash, salt = _hash_password(password)
     init_db()
     with _conn() as c:
@@ -1152,6 +1167,157 @@ def set_user_password(username: str, password: str) -> None:
             "UPDATE users SET password_hash = ?, salt = ? WHERE username = ?",
             (pw_hash, salt, username),
         )
+    bump_session_epoch(username)
+
+
+# ---------------------------------------------------------------------------
+# P8：账号安全（密码策略 / 修改与重置 / 登录失败锁定 / 会话参数）
+# ---------------------------------------------------------------------------
+
+# 常见弱口令（小样本，配合长度/复杂度规则使用）
+COMMON_PASSWORDS = {
+    "password", "password1", "password123", "12345678", "123456789", "qwerty123",
+    "admin123", "admin@123", "letmein", "welcome1", "iloveyou", "abc12345",
+    "1qaz2wsx", "qwertyuiop", "woaini1314", "a123456789", "zhangsan", "test1234",
+}
+
+LOGIN_MAX_FAILS = 5
+LOGIN_WINDOW_MINUTES = 15
+LOCK_MINUTES = 5
+LOCK_MINUTES_LONG = 30
+
+
+def validate_password(username: str, password: str) -> list[str]:
+    """密码策略校验，返回问题代码列表（空列表 = 通过）。
+
+    代码：too_short / need_classes / contains_username / too_common
+    """
+    password = password or ""
+    issues: list[str] = []
+    if len(password) < 8:
+        issues.append("too_short")
+    classes = sum(
+        bool(re.search(pattern, password))
+        for pattern in (r"[a-z]", r"[A-Z]", r"[0-9]", r"[^A-Za-z0-9]")
+    )
+    if classes < 2:
+        issues.append("need_classes")
+    if username and username.strip() and username.strip().lower() in password.lower():
+        issues.append("contains_username")
+    if password.lower() in COMMON_PASSWORDS:
+        issues.append("too_common")
+    return issues
+
+
+def change_password(username: str, old_password: str, new_password: str) -> None:
+    """用户自助修改密码：校验旧密码 → 策略校验 → 更新 → 使旧会话失效。"""
+    if not verify_user(username, old_password):
+        raise ValueError("old_password_incorrect")
+    set_user_password(username, new_password)
+
+
+def force_logout(username: str) -> str:
+    """强制下线：递增会话纪元，该用户名下所有已签发 cookie 立即失效。"""
+    epoch = bump_session_epoch(username)
+    log_action("系统", "强制下线", username)
+    return epoch
+
+
+def session_days() -> int:
+    """会话有效期（天）：设置页可改，环境变量 STRIDE_GPT_SESSION_DAYS 兜底。"""
+    try:
+        raw = get_meta("session_days", "") or os.environ.get("STRIDE_GPT_SESSION_DAYS", "")
+        value = int(raw) if raw else 7
+    except (TypeError, ValueError):
+        value = 7
+    return max(1, min(30, value))
+
+
+def secure_cookie() -> bool:
+    """HTTPS 部署时置 STRIDE_GPT_SECURE_COOKIE=1，cookie 加 Secure 标记。"""
+    return (os.environ.get("STRIDE_GPT_SECURE_COOKIE") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _parse_time(text: str) -> datetime | None:
+    try:
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+
+
+def login_lock_status(identifier: str) -> dict:
+    """查询登录锁定状态：{locked, minutes, fails, fails_left}。"""
+    identifier = (identifier or "").strip() or "匿名"
+    init_db()
+    with _conn() as c:
+        row = c.execute(
+            "SELECT * FROM login_attempts WHERE identifier = ?", (identifier,)
+        ).fetchone()
+    if not row:
+        return {"locked": False, "minutes": 0, "fails": 0, "fails_left": LOGIN_MAX_FAILS}
+    fails = int(row["fails"] or 0)
+    locked_until = _parse_time(row["locked_until"] or "")
+    if locked_until and locked_until > datetime.now():
+        seconds = int((locked_until - datetime.now()).total_seconds())
+        return {
+            "locked": True,
+            "minutes": max(1, seconds // 60 + (1 if seconds % 60 else 0)),
+            "fails": fails,
+            "fails_left": 0,
+        }
+    return {
+        "locked": False,
+        "minutes": 0,
+        "fails": fails,
+        "fails_left": max(0, LOGIN_MAX_FAILS - fails),
+    }
+
+
+def record_login_failure(identifier: str) -> dict:
+    """记录一次登录失败，达到阈值后锁定（返回最新锁定状态）。"""
+    identifier = (identifier or "").strip() or "匿名"
+    init_db()
+    now = datetime.now()
+    with _conn() as c:
+        row = c.execute(
+            "SELECT * FROM login_attempts WHERE identifier = ?", (identifier,)
+        ).fetchone()
+        if row:
+            first = _parse_time(row["first_fail_at"] or "")
+            fails = int(row["fails"] or 0)
+            if not first or (now - first).total_seconds() > LOGIN_WINDOW_MINUTES * 60:
+                fails = 0  # 统计窗口过期，重新计数
+                first = now
+            fails += 1
+        else:
+            fails, first = 1, now
+        locked_until = ""
+        if fails >= LOGIN_MAX_FAILS * 2:
+            locked_until = (now + timedelta(minutes=LOCK_MINUTES_LONG)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+        elif fails >= LOGIN_MAX_FAILS:
+            locked_until = (now + timedelta(minutes=LOCK_MINUTES)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+        c.execute(
+            "INSERT INTO login_attempts(identifier, fails, first_fail_at, locked_until)"
+            " VALUES(?, ?, ?, ?)"
+            " ON CONFLICT(identifier) DO UPDATE SET"
+            " fails = excluded.fails, first_fail_at = excluded.first_fail_at,"
+            " locked_until = excluded.locked_until",
+            (identifier, fails, first.strftime("%Y-%m-%d %H:%M:%S"), locked_until),
+        )
+    return login_lock_status(identifier)
+
+
+def clear_login_failures(identifier: str) -> None:
+    identifier = (identifier or "").strip() or "匿名"
+    init_db()
+    with _conn() as c:
+        c.execute("DELETE FROM login_attempts WHERE identifier = ?", (identifier,))
 
 
 # ---------------------------------------------------------------------------

@@ -84,6 +84,7 @@ from shared import (
     load_draft,
     make_session_token,
     save_config,
+    store,
     urlparse,
     verify_session_token,
 )
@@ -182,7 +183,14 @@ _logging.bind(user=st.session_state.get("user", ""))
 
 if not st.session_state.get("_cookie_synced"):
     with st.container(key="cookie_sync"):
-        st.iframe(_cookie_js(make_session_token(st.session_state.get("user", ""))), height=1)
+        st.iframe(
+            _cookie_js(
+                make_session_token(
+                    st.session_state.get("user", ""), days=store.session_days()
+                )
+            ),
+            height=1,
+        )
     st.session_state["_cookie_synced"] = True
 
 if not st.session_state.get("_draft_loaded"):

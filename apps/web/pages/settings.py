@@ -259,6 +259,28 @@ def render_settings() -> None:
                 value=bool(st.session_state.get("scrub_enabled", True)),
                 help=_t("识别 OpenAI/Anthropic/GitHub/AWS/JWT/私钥等模式并替换为 [已脱敏:...]。", "Detects OpenAI/Anthropic/GitHub/AWS/JWT/private-key patterns and replaces them with [redacted:…]."),
             )
+            if "session_days_input" not in st.session_state:
+                st.session_state["session_days_input"] = store.session_days()
+            st.number_input(
+                _t("会话有效期（天）", "Session lifetime (days)"),
+                min_value=1,
+                max_value=30,
+                step=1,
+                key="session_days_input",
+                on_change=lambda: store.set_meta(
+                    "session_days", str(int(st.session_state.get("session_days_input") or 7))
+                ),
+                help=_t(
+                    "浏览器免登录时长（1-30 天）；「退出所有设备」或改密码会立即失效。",
+                    "How long the browser stays signed in (1-30 days); “sign out everywhere” or a password change invalidates it immediately.",
+                ),
+            )
+            st.caption(
+                _t(
+                    "登录失败 5 次锁定 5 分钟（每 15 分钟滚动统计）；HTTPS 部署设置 STRIDE_GPT_SECURE_COOKIE=1 可启用 Secure Cookie。",
+                    "5 failed sign-ins lock the account for 5 minutes (rolling 15-minute window); set STRIDE_GPT_SECURE_COOKIE=1 on HTTPS deployments to enable Secure cookies.",
+                )
+            )
 
         with st.container(border=True, key="settings_usage"):
             st.markdown(_t("#### 用量与成本", "#### Usage & cost"))

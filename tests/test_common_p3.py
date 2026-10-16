@@ -130,32 +130,32 @@ class TestDiff:
 
 class TestUsers:
     def test_create_verify(self, sandbox):
-        store.create_user("alice", "secret123", "admin")
-        account = store.verify_user("alice", "secret123")
+        store.create_user("alice", "Str0ng!Pass1", "admin")
+        account = store.verify_user("alice", "Str0ng!Pass1")
         assert account == {"username": "alice", "role": "admin"}
         assert store.verify_user("alice", "wrong") is None
-        assert store.verify_user("nobody", "secret123") is None
+        assert store.verify_user("nobody", "Str0ng!Pass1") is None
 
     def test_duplicate_and_short_password(self, sandbox):
-        store.create_user("bob", "secret123")
+        store.create_user("bob", "Str0ng!Pass1")
         with pytest.raises(ValueError):
-            store.create_user("bob", "secret456")
+            store.create_user("bob", "Str0ng!Pass2")
         with pytest.raises(ValueError):
             store.create_user("carol", "123")
 
     def test_password_reset_and_delete(self, sandbox):
-        store.create_user("dave", "secret123")
-        store.set_user_password("dave", "newsecret")
-        assert store.verify_user("dave", "newsecret") is not None
+        store.create_user("dave", "Str0ng!Pass1")
+        store.set_user_password("dave", "Another!Pass2")
+        assert store.verify_user("dave", "Another!Pass2") is not None
         store.delete_user("dave")
         assert store.get_user("dave") is None
-        assert store.verify_user("dave", "newsecret") is None
+        assert store.verify_user("dave", "Another!Pass2") is None
 
     def test_password_not_stored_plaintext(self, sandbox):
-        store.create_user("erin", "supersecret")
+        store.create_user("erin", "Sup3rSecret!x")
         with store._conn() as conn:
             row = conn.execute("SELECT password_hash, salt FROM users WHERE username='erin'").fetchone()
-        assert "supersecret" not in (row["password_hash"] + row["salt"])
+        assert "Sup3rSecret!x" not in (row["password_hash"] + row["salt"])
 
 
 class TestAudit:
