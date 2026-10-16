@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import uuid
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -20,8 +23,8 @@ for _p in (_REPO_ROOT, _APPS_DIR):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from common import generation, store, usage  # noqa: E402
-from fastapi import Depends, FastAPI, Header, HTTPException  # noqa: E402
+from common import agentic, generation, store, usage  # noqa: E402
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
@@ -89,6 +92,17 @@ class ThreatPatch(BaseModel):
     status: str | None = None
     owner: str | None = None
     note: str | None = None
+
+
+class CodeAuditRequest(BaseModel):
+    repo_url: str = Field(..., description="https 的 Git 仓库地址")
+    project: str = Field(default="", description="项目名（用于归档）")
+    description: str = Field(default="", description="补充说明")
+    worker_model: str | None = Field(default=None, description="覆盖 worker 模型")
+    architect_model: str | None = Field(default=None, description="覆盖 architect 模型")
+    max_llm_calls: int = Field(default=60, ge=0, description="LLM 调用上限（0=不限）")
+    max_tool_calls: int = Field(default=80, ge=0, description="工具调用上限（0=不限）")
+    token: str | None = Field(default=None, description="私有仓库访问令牌")
 
 
 class ScheduleCreate(BaseModel):
@@ -441,6 +455,199 @@ def api_push_webhooks(name: str, api_key_name: str = Depends(require_api_key)) -
         raise HTTPException(status_code=400, detail="该项目暂无威胁条目")
     outcomes = generation.push_webhooks(name, threats)
     return {"ok": all(o.get("ok") for o in outcomes), "outcomes": outcomes}
+
+
+# ---------------------------------------------------------------------------
+# 代码审计任务（后台线程 + 进度）
+# ---------------------------------------------------------------------------
+
+_JOBS: dict[str, dict] = {}
+_JOBS_LOCK = threading.Lock()
+_MAX_JOBS = 50
+
+
+def _job_public(job: dict) -> dict:
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "project": job["project"],
+        "source": job["source"],
+        "created_at": job["created_at"],
+        "finished_at": job.get("finished_at"),
+        "error": job.get("error"),
+        "result": job.get("result"),
+        "progress": job.get("progress", [])[-30:],
+    }
+
+
+def _start_job(
+    *,
+    source: str,
+    project: str,
+    description: str,
+    api_key_name: str,
+    worker_model: str | None,
+    architect_model: str | None,
+    max_llm_calls: int,
+    max_tool_calls: int,
+    zip_bytes: bytes | None = None,
+    repo_url: str | None = None,
+    token: str | None = None,
+) -> str:
+    job_id = uuid.uuid4().hex[:12]
+    job = {
+        "job_id": job_id,
+        "status": "running",
+        "project": project,
+        "source": source,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "progress": [],
+        "cancel_requested": False,
+    }
+    with _JOBS_LOCK:
+        _JOBS[job_id] = job
+        # 只保留最近的任务
+        while len(_JOBS) > _MAX_JOBS:
+            for old_id, old in list(_JOBS.items()):
+                if old["status"] != "running":
+                    _JOBS.pop(old_id, None)
+                    break
+            else:
+                break
+
+    def _event(kind: str, payload: dict) -> None:
+        with _JOBS_LOCK:
+            job["progress"].append({"kind": kind, **payload})
+
+    def _cancel_check() -> bool:
+        return bool(job.get("cancel_requested"))
+
+    def _worker() -> None:
+        usage.set_call_context(actor=f"api:{api_key_name}", source="api", project=project)
+        try:
+            models = agentic.build_model_pair(
+                worker_model=worker_model, architect_model=architect_model
+            )
+            common = {
+                "project": project,
+                "description": description,
+                "models": models,
+                "max_llm_calls": max_llm_calls,
+                "max_tool_calls": max_tool_calls,
+                "on_event": _event,
+                "cancel_check": _cancel_check,
+            }
+            if zip_bytes is not None:
+                result = agentic.audit_zip(zip_bytes, **common)
+            else:
+                result = agentic.audit_repo(repo_url or "", token=token, **common)
+            with _JOBS_LOCK:
+                job.update(
+                    status="done",
+                    finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    result={
+                        "report_id": result["report_id"],
+                        "threats_inserted": result["threats_inserted"],
+                        "threats_total": result["threats_total"],
+                        "run_status": result["status"],
+                    },
+                    summary=result["markdown"][:2000],
+                )
+        except agentic.AgenticCancelledError:
+            with _JOBS_LOCK:
+                job.update(
+                    status="cancelled",
+                    finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                )
+        except Exception as exc:
+            with _JOBS_LOCK:
+                job.update(
+                    status="failed",
+                    finished_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+
+    threading.Thread(target=_worker, name=f"code-audit-{job_id}", daemon=True).start()
+    return job_id
+
+
+@app.post("/api/v1/code-audit", summary="提交代码审计任务（Git 仓库）", status_code=202)
+def api_code_audit(
+    body: CodeAuditRequest, api_key_name: str = Depends(require_api_key)
+) -> dict:
+    _enforce_quota(api_key_name)
+    project = body.project.strip() or body.repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
+    job_id = _start_job(
+        source="repo",
+        project=project,
+        description=body.description,
+        api_key_name=api_key_name,
+        worker_model=body.worker_model,
+        architect_model=body.architect_model,
+        max_llm_calls=body.max_llm_calls,
+        max_tool_calls=body.max_tool_calls,
+        repo_url=body.repo_url.strip(),
+        token=body.token,
+    )
+    return {"ok": True, "job_id": job_id, "project": project, "status": "running"}
+
+
+@app.post("/api/v1/code-audit/upload", summary="提交代码审计任务（ZIP 上传）", status_code=202)
+def api_code_audit_upload(
+    file: UploadFile = File(..., description="代码 ZIP"),
+    project: str = Form(default=""),
+    description: str = Form(default=""),
+    worker_model: str | None = Form(default=None),
+    architect_model: str | None = Form(default=None),
+    max_llm_calls: int = Form(default=60),
+    max_tool_calls: int = Form(default=80),
+    api_key_name: str = Depends(require_api_key),
+) -> dict:
+    _enforce_quota(api_key_name)
+    data = file.file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    job_id = _start_job(
+        source="zip",
+        project=project.strip() or (file.filename or "upload").removesuffix(".zip"),
+        description=description,
+        api_key_name=api_key_name,
+        worker_model=worker_model,
+        architect_model=architect_model,
+        max_llm_calls=max_llm_calls,
+        max_tool_calls=max_tool_calls,
+        zip_bytes=data,
+    )
+    return {"ok": True, "job_id": job_id, "status": "running"}
+
+
+@app.get("/api/v1/code-audit/jobs", summary="代码审计任务列表")
+def api_code_audit_jobs(api_key_name: str = Depends(require_api_key)) -> dict:
+    with _JOBS_LOCK:
+        jobs = [_job_public(job) for job in reversed(list(_JOBS.values()))]
+    for job in jobs:
+        job.pop("progress", None)
+    return {"ok": True, "count": len(jobs), "jobs": jobs}
+
+
+@app.get("/api/v1/code-audit/jobs/{job_id}", summary="代码审计任务详情")
+def api_code_audit_job(job_id: str, api_key_name: str = Depends(require_api_key)) -> dict:
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return {"ok": True, **_job_public(job)}
+
+
+@app.delete("/api/v1/code-audit/jobs/{job_id}", summary="取消代码审计任务")
+def api_code_audit_cancel(job_id: str, api_key_name: str = Depends(require_api_key)) -> dict:
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        if job["status"] == "running":
+            job["cancel_requested"] = True
+    return {"ok": True, "job_id": job_id, "status": job["status"]}
 
 
 # ---------------------------------------------------------------------------

@@ -264,3 +264,31 @@ Python 看到函数内存在对 `_t` 的赋值就把它当作局部变量，于�
 - 全量测试后真实库用量行数保持 **0**（不再污染）
 - 浏览器实测：概览仪表盘渲染正常（KPI/图表/验证统计/预算/近期报告/快捷入口），导航、去 demo 化侧边栏生效
 - API 实测：`/usage`、`/verify`、配额 429 路径
+
+## 增量记录（2026-10-17）：P6 Agentic 代码分析进 Web
+
+### 能力
+- 新页面「代码审计」(`/code-audit`)：上传 ZIP 或填写 https 仓库地址，可选 worker/architect 模型与
+  LLM/工具调用上限，带确认勾选（成本提示），运行中实时显示阶段、子系统进度与工具调用
+- 分析完成后：报告归档为「代码审计」类型（Markdown/JSON/SARIF 可下载），
+  威胁写入台账并带 **subsystem / source=agentic / evidence（代码路径+片段+行号）**
+- API 异步任务：`POST /code-audit`（仓库）、`POST /code-audit/upload`（ZIP）、任务查询/列表/取消
+
+### 公共层 `apps/common/agentic.py`
+- `extract_zip`：zip-slip / 绝对路径 / 符号链接防护，解压总量 300MB、文件数 20000 上限，单根目录自动识别
+- `clone_repo`：仅 https + 主机白名单（`STRIDE_GPT_GIT_HOSTS` 可扩展），`--depth 1 --single-branch`、
+  禁交互认证、令牌经 `http.extraheader` 注入；克隆超时 300s
+- `_EventProgress`：实现完整 ProgressCallback 协议，把 agent 事件转成回调；
+  **协作式取消**（回调里抛异常中止运行）
+- `archive_report`：渲染 MD/JSON/SARIF 并归档 + 按（类型+场景）去重写入带证据的威胁
+
+### 存储
+- `KIND_LABELS` 新增 `code_analysis`（代码审计 / Code Audit），报告类型标签 EN 映射同步
+- threats 新增 `subsystem` / `source` / `evidence` 列（含老库迁移）
+
+### 验证
+- `uv run pytest`：**892 passed**（新增 17 个 P6 测试：解压安全 6 项、仓库校验 4 项、归档与去重、
+  模型对覆盖、进度适配器与取消、API 任务成功/失败路径）
+- **端到端（模拟 LLM 走完整 agent 协议）**：ZIP → 规划 1 个子系统 → 分析产出 2 条带证据威胁 →
+  归档 `code_analysis` + SARIF 2 条结果；HTTP 上传任务 202 → 轮询 done（report_id/威胁数）
+- 浏览器实测：`/code-audit` 页面渲染正常（来源选择/确认/按钮/无异常）

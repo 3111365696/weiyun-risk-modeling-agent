@@ -204,3 +204,36 @@ curl -sS -X POST "http://localhost:8000/api/v1/schedules" -H "X-API-Key: $WY_API
 生成类接口的响应中：
 - `threat-model` 会附带 `coverage`（STRIDE 覆盖度）与 `verification`（已确认/存疑/已驳回统计）
 - API Key 可设置**日 token 配额**与**月费用配额**，超限返回 `429`
+
+## 代码审计任务（P6，异步）
+
+深度 agentic 分析较慢（数分钟），因此以**任务**方式提交，轮询获取进度与结果。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/v1/code-audit` | 提交 Git 仓库审计（JSON：`repo_url`、`project`、`worker_model`、`max_llm_calls`、`token`…）→ `202 {job_id}` |
+| POST | `/api/v1/code-audit/upload` | 提交 ZIP 审计（multipart：`file` + `project` 等表单字段） |
+| GET | `/api/v1/code-audit/jobs` | 任务列表（最近 50 个） |
+| GET | `/api/v1/code-audit/jobs/{job_id}` | 任务详情：`status`（running/done/failed/cancelled）、`progress`（最近 30 条事件）、`result` |
+| DELETE | `/api/v1/code-audit/jobs/{job_id}` | 请求取消（协作式：下一次进度回调时中止） |
+
+```bash
+# 提交 ZIP
+JOB=$(curl -sS -X POST "http://localhost:8000/api/v1/code-audit/upload" \
+  -H "X-API-Key: $WY_API_KEY" \
+  -F "file=@myapp.zip" -F "project=订单服务" -F "max_llm_calls=60" | python3 -c "import json,sys;print(json.load(sys.stdin)['job_id'])")
+
+# 轮询
+curl -sS "http://localhost:8000/api/v1/code-audit/jobs/$JOB" -H "X-API-Key: $WY_API_KEY"
+```
+
+结果：报告以 `code_analysis` 类型归档（Markdown/JSON/SARIF），威胁会写入台账并带
+`subsystem`、`source=agentic` 与 `evidence`（代码路径 + 片段 + 行号，已通过磁盘校验）。
+
+### 安全边界
+
+- ZIP：拒绝路径穿越 / 绝对路径 / 符号链接，解压总量 ≤300MB、文件数 ≤20000
+- Git：仅 https；主机白名单（`github.com`、`gitlab.com`，可用 `STRIDE_GPT_GIT_HOSTS` 追加）；
+  `--depth 1 --single-branch`，不拉子模块，禁用交互式认证；令牌仅在主机校验后经
+  `http.extraheader` 注入，不进入 URL 或日志
+- 工作区默认在分析结束后清理（`~/.stride-gpt/workspaces/`）

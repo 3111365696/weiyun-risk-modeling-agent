@@ -161,6 +161,8 @@ ignore = [
 "stride_gpt/cli.py" = ["E402"]
 # Streamlit sets page config / sys.path before its imports
 "apps/web/main.py" = ["E402"]
+# FastAPI 依赖注入要求 File(...) / Form(...) 作为默认值
+"apps/api/main.py" = ["B008"]
 
 [tool.isort]
 profile = "black"

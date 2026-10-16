@@ -55,6 +55,7 @@ PERSIST_KEYS = [
 ]
 
 KIND_LABELS = {
+    "code_analysis": "代码审计",
     "threat_model": "威胁模型",
     "attack_tree": "攻击树",
     "dfd": "数据流图",
@@ -300,6 +301,9 @@ def init_db() -> None:
         _ensure_column(c, "threats", "confidence", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(c, "threats", "verification_note", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(c, "threats", "verified_at", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(c, "threats", "subsystem", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(c, "threats", "source", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(c, "threats", "evidence", "TEXT NOT NULL DEFAULT ''")
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
@@ -594,8 +598,13 @@ def _threat_fingerprint(threat_type: str, scenario: str) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
-def add_threats(project: str, report_id: int | None, threats: list[dict]) -> int:
-    """写入威胁条目，按（类型+场景）指纹在项目内去重。返回新增数量。"""
+def add_threats(
+    project: str, report_id: int | None, threats: list[dict], *, source: str = ""
+) -> int:
+    """写入威胁条目，按（类型+场景）指纹在项目内去重。返回新增数量。
+
+    ``source`` 标记来源（如 "agentic" 表示代码审计、带代码证据）。
+    """
     if not project or not threats:
         return 0
     init_db()
@@ -614,12 +623,14 @@ def add_threats(project: str, report_id: int | None, threats: list[dict]) -> int
             ).fetchone()
             if exists:
                 continue
+            evidence = t.get("evidence") or []
             c.execute(
                 """
                 INSERT INTO threats
                     (project, report_id, threat_type, scenario, impact, owasp_llm, owasp_asi,
-                     mitre, insider, status, created_at, updated_at, fingerprint)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '待处理', ?, ?, ?)
+                     mitre, insider, status, created_at, updated_at, fingerprint,
+                     subsystem, source, evidence)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '待处理', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project,
@@ -634,6 +645,9 @@ def add_threats(project: str, report_id: int | None, threats: list[dict]) -> int
                     now,
                     now,
                     fp,
+                    str(t.get("subsystem") or "").strip(),
+                    str(t.get("source") or source or "").strip(),
+                    json.dumps(evidence, ensure_ascii=False)[:20000] if evidence else "",
                 ),
             )
             inserted += 1
