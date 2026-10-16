@@ -1,5 +1,11 @@
 # main.py
 
+# pyarrow 的静态 mimalloc 在部分 macOS 环境会在 NumPy->Arrow 转换时段错误（SIGSEGV），
+# 改用系统内存池规避；必须在 import streamlit（进而 import pyarrow）之前设置。
+import os as _os
+
+_os.environ.setdefault("ARROW_DEFAULT_MEMORY_POOL", "system")
+
 # Ensure the repo root (containing the stride_gpt/ package) is importable
 # when this file is launched directly with `streamlit run apps/web/main.py`.
 import sys
@@ -10,6 +16,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import base64
+import hashlib
 import hmac
 import html
 import json
@@ -99,17 +106,34 @@ from threat_model import (
 from store import (
     KIND_LABELS,
     PERSIST_KEYS,
+    SESSION_COOKIE,
+    THREAT_STATUSES,
+    add_threats,
+    apply_dread_scores,
+    backfill_project,
     clear_config,
     config_saved_at,
     delete_report,
-    load_config,
     export_zip,
+    get_project,
     get_report,
+    list_projects,
     list_reports,
+    list_threats,
+    load_config,
+    load_draft,
+    make_session_token,
     report_count,
     report_to_html,
     save_config,
+    save_draft,
     save_report,
+    sync_projects_from_reports,
+    threat_stats,
+    update_project_description,
+    update_threats,
+    upsert_project,
+    verify_session_token,
 )
 
 from stride_gpt.core.drawio_parser import drawio_to_prompt_section
@@ -431,7 +455,8 @@ def render_guided_description_builder(*, wrap_in_expander=False):
 # Function to get available models from LM Studio Server
 def get_lm_studio_models(endpoint, api_key="not-needed"):
     try:
-        client = OpenAI(base_url=f"{endpoint}/v1", api_key=api_key)
+        # 哨兵值：LM Studio 无鉴权时 OpenAI 客户端仍要求非空 api_key
+        client = OpenAI(base_url=f"{endpoint}/v1", api_key=api_key or "not-needed")
         models = client.models.list()
         return [model.id for model in models.data]
     except requests.exceptions.ConnectionError:
@@ -897,43 +922,33 @@ def mermaid(code: str, height: int = 500) -> None:
 
 
 def load_env_variables():
+    """把 .env / 环境变量填入会话状态。
+
+    注意：本函数在每次 rerun 都会执行，必须用 setdefault 语义，
+    否则会把用户在会话中（或已保存配置）修改的值不断重置回环境变量值。
+    """
     # Try to load from .env file
     if Path(".env").exists():
         load_dotenv(".env")
 
-    # Load GitHub API key from environment variable
-    github_api_key = os.getenv("GITHUB_API_KEY")
-    if github_api_key:
-        st.session_state["github_api_key"] = github_api_key
-
-    # Load other API keys if needed
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if openai_api_key:
-        st.session_state["openai_api_key"] = openai_api_key
-
-    anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
-    if anthropic_api_key:
-        st.session_state["anthropic_api_key"] = anthropic_api_key
-
-    google_api_key = os.getenv("GOOGLE_API_KEY")
-    if google_api_key:
-        st.session_state["google_api_key"] = google_api_key
-
-    mistral_api_key = os.getenv("MISTRAL_API_KEY")
-    if mistral_api_key:
-        st.session_state["mistral_api_key"] = mistral_api_key
-
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    if groq_api_key:
-        st.session_state["groq_api_key"] = groq_api_key
-
-    deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
-    if deepseek_api_key:
-        st.session_state["deepseek_api_key"] = deepseek_api_key
+    for _state_key, _env_name in (
+        ("github_api_key", "GITHUB_API_KEY"),
+        ("openai_api_key", "OPENAI_API_KEY"),
+        ("anthropic_api_key", "ANTHROPIC_API_KEY"),
+        ("google_api_key", "GOOGLE_API_KEY"),
+        ("mistral_api_key", "MISTRAL_API_KEY"),
+        ("groq_api_key", "GROQ_API_KEY"),
+        ("deepseek_api_key", "DEEPSEEK_API_KEY"),
+        ("lm_studio_api_key", "LM_STUDIO_API_KEY"),
+    ):
+        _env_val = os.getenv(_env_name)
+        if _env_val:
+            st.session_state.setdefault(_state_key, _env_val)
 
     # Add LM Studio Server endpoint configuration
-    lm_studio_endpoint = os.getenv("LM_STUDIO_ENDPOINT", "http://localhost:1234")
-    st.session_state["lm_studio_endpoint"] = lm_studio_endpoint
+    st.session_state.setdefault(
+        "lm_studio_endpoint", os.getenv("LM_STUDIO_ENDPOINT", "http://localhost:1234")
+    )
 
 
 # Call this function at the start of your app
@@ -944,10 +959,12 @@ load_env_variables()
 from stride_gpt.models import PROVIDERS as _PROVIDERS
 from stride_gpt.models import get_model, get_models_for_provider, model_supports_thinking
 
-# 载入服务端保存的配置（覆盖 .env 中的同名值）
-for _cfg_key, _cfg_val in load_config().items():
-    if _cfg_val not in (None, ""):
-        st.session_state[_cfg_key] = _cfg_val
+# 载入服务端保存的配置（每个会话只加载一次，避免覆盖会话内的修改）
+if not st.session_state.get("_config_loaded"):
+    for _cfg_key, _cfg_val in load_config().items():
+        if _cfg_val not in (None, ""):
+            st.session_state[_cfg_key] = _cfg_val
+    st.session_state["_config_loaded"] = True
 
 # 配置默认值（可在「系统配置」界面修改）
 if "model_provider" not in st.session_state:
@@ -1139,6 +1156,9 @@ h3 { font-size: 1.08rem !important; }
 }
 .sg-page-head { margin: .1rem 0 1rem; }
 .sg-page-title { font-size: 1.45rem; font-weight: 650; color: #EDEBF5; letter-spacing: .01em; margin-top: .2rem; }
+
+/* cookie 同步用的隐形 iframe */
+.st-key-cookie_sync iframe, .st-key-cookie_clear iframe { display: none !important; }
 
 /* 报告历史 */
 .sg-rep-meta { color: #948EA8; font-size: .78rem; }
@@ -1453,8 +1473,10 @@ def _do_logout() -> None:
         "login_user",
         "login_password",
         "confirm_logout",
+        "_cookie_synced",
     ):
         st.session_state.pop(key, None)
+    st.session_state["_cookie_clear"] = True
     st.rerun()
 
 
@@ -1478,6 +1500,28 @@ def _logout_dialog() -> None:
             st.rerun()
 
 
+def _cookie_js(token: str, *, clear: bool = False) -> str:
+    """通过 iframe 在父页面写入/清除会话 cookie。"""
+    if clear:
+        cookie = f"{SESSION_COOKIE}=; path=/; max-age=0"
+    else:
+        cookie = f"{SESSION_COOKIE}={token}; path=/; max-age={7 * 86400}; SameSite=Lax"
+    return f'<script>try {{ window.parent.document.cookie = "{cookie}"; }} catch (e) {{}}</script>'
+
+
+# cookie 自动登录（7 天有效）
+if not st.session_state.get("authenticated"):
+    try:
+        _cookie_token = st.context.cookies.get(SESSION_COOKIE)
+    except Exception:
+        _cookie_token = None
+    _cookie_user = verify_session_token(_cookie_token)
+    if _cookie_user:
+        st.session_state["authenticated"] = True
+        st.session_state["user"] = _cookie_user
+        st.session_state["role"] = "系统管理员"
+        st.session_state["login_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+
 if not st.session_state.get("authenticated"):
     # 记住深链目标（刷新 / 分享链接进入时），登录成功后跳转
     try:
@@ -1486,8 +1530,26 @@ if not st.session_state.get("authenticated"):
         _pending_path = ""
     if _pending_path:
         st.session_state["_pending_path"] = _pending_path
+    if st.session_state.pop("_cookie_clear", False):
+        with st.container(key="cookie_clear"):
+            st.iframe(_cookie_js("", clear=True), height=1)
     render_login()
     st.stop()
+
+# 首次通过登录后写入会话 cookie（浏览器刷新免登录）
+if not st.session_state.get("_cookie_synced"):
+    with st.container(key="cookie_sync"):
+        st.iframe(_cookie_js(make_session_token(st.session_state.get("user", ""))), height=1)
+    st.session_state["_cookie_synced"] = True
+
+# 载入上次未完成的草稿
+if not st.session_state.get("_draft_loaded"):
+    _draft = load_draft("__default__")
+    if _draft:
+        for _k, _v in _draft.items():
+            if _v not in (None, "", []) and not st.session_state.get(_k):
+                st.session_state[_k] = _v
+    st.session_state["_draft_loaded"] = True
 
 
 # Define callback for model provider change
@@ -2143,6 +2205,21 @@ def _page_threat_model() -> None:
 - 凭据访问（OAuth 令牌、API Key、服务账号）
 - 自主操作范围（无需审批能做什么？）"""
             )
+
+    # 草稿自动保存（刷新后自动恢复）
+    _draft_payload = {
+        "app_input": st.session_state.get("app_input", ""),
+        "app_type": st.session_state.get("app_type", ""),
+        "sensitive_data": st.session_state.get("sensitive_data", ""),
+        "internet_facing": st.session_state.get("internet_facing", ""),
+        "authentication": st.session_state.get("authentication", []),
+    }
+    _draft_sig = hashlib.md5(
+        json.dumps(_draft_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    if st.session_state.get("_draft_sig") != _draft_sig:
+        save_draft("__default__", _draft_payload)
+        st.session_state["_draft_sig"] = _draft_sig
 
     # ------------------ Threat Model Generation ------------------ #
 
@@ -3021,16 +3098,25 @@ def _page_test_cases() -> None:
             st.error("请先生成威胁模型，再请求测试用例。")
 
 
-def _archive(kind: str, content_md: str, content_json=None) -> None:
-    """把生成结果归档到「报告历史」（失败不影响生成结果展示）。"""
+def _archive(
+    kind: str,
+    content_md: str,
+    content_json=None,
+    *,
+    project: str | None = None,
+    description: str | None = None,
+) -> None:
+    """把生成结果归档到「报告历史」，并同步项目/威胁台账（失败不影响展示）。"""
     if not content_md:
         return
     try:
-        _desc = (st.session_state.get("app_input") or "").strip()
-        _project = (st.session_state.get("project_name") or "").strip()
+        _desc = (
+            description if description is not None else st.session_state.get("app_input") or ""
+        ).strip()
+        _project = (project or st.session_state.get("project_name") or "").strip()
         if not _project:
             _project = (_desc[:24] + "…") if len(_desc) > 24 else (_desc or "未命名项目")
-        save_report(
+        _rid = save_report(
             kind=kind,
             title=f"{KIND_LABELS.get(kind, kind)} · {_project}",
             project=_project,
@@ -3039,6 +3125,11 @@ def _archive(kind: str, content_md: str, content_json=None) -> None:
             provider=st.session_state.get("model_provider", ""),
             model=st.session_state.get("selected_model", ""),
         )
+        upsert_project(_project, _desc)
+        if kind == "threat_model" and isinstance(content_json, dict):
+            add_threats(_project, _rid, list(content_json.get("threat_model") or []))
+        if kind == "dread" and isinstance(content_json, dict):
+            apply_dread_scores(_project, content_json)
         st.toast("已归档到「报告历史」")
     except Exception:
         pass
@@ -3171,10 +3262,390 @@ def _page_reports() -> None:
             st.session_state.pop("_report_view_id", None)
 
 
+_KEY_BY_PROVIDER = {
+    "OpenAI API": "openai_api_key",
+    "Anthropic API": "anthropic_api_key",
+    "Google AI API": "google_api_key",
+    "Mistral API": "mistral_api_key",
+    "Groq API": "groq_api_key",
+    "DeepSeek API": "deepseek_api_key",
+    "LM Studio Server": None,
+}
+
+
+def _run_model(kind: str, prompt: str):
+    """按当前会话配置调用对应提供商的生成函数（供一键全流程复用）。"""
+    _provider = st.session_state.get("model_provider", "OpenAI API")
+    _model = st.session_state.get("selected_model", "")
+    _oai = st.session_state.get("openai_api_key", "")
+    _ant = st.session_state.get("anthropic_api_key", "")
+    _goo = st.session_state.get("google_api_key", "")
+    _mis = st.session_state.get("mistral_api_key", "")
+    _gro = st.session_state.get("groq_api_key", "")
+    _dee = st.session_state.get("deepseek_api_key", "")
+    _lm_ep = st.session_state.get("lm_studio_endpoint", "http://localhost:1234")
+    _lm_key = st.session_state.get("lm_studio_api_key", "")
+
+    _table = {
+        "threat_model": {
+            "OpenAI API": lambda: get_threat_model(_oai, _model, prompt),
+            "Google AI API": lambda: get_threat_model_google(_goo, _model, prompt),
+            "Mistral API": lambda: get_threat_model_mistral(_mis, _model, prompt),
+            "Anthropic API": lambda: get_threat_model_anthropic(_ant, _model, prompt),
+            "LM Studio Server": lambda: get_threat_model_lm_studio(_lm_ep, _model, prompt, _lm_key),
+            "Groq API": lambda: get_threat_model_groq(_gro, _model, prompt),
+            "DeepSeek API": lambda: get_threat_model_deepseek(_dee, _model, prompt),
+        },
+        "dfd": {
+            "OpenAI API": lambda: get_dfd_openai(_oai, _model, prompt),
+            "Google AI API": lambda: get_dfd_google(_goo, _model, prompt),
+            "Mistral API": lambda: get_dfd_mistral(_mis, _model, prompt),
+            "Anthropic API": lambda: get_dfd_anthropic(_ant, _model, prompt),
+            "LM Studio Server": lambda: get_dfd_lm_studio(_lm_ep, _model, prompt, _lm_key),
+            "Groq API": lambda: get_dfd_groq(_gro, _model, prompt),
+            "DeepSeek API": lambda: get_dfd_deepseek(_dee, _model, prompt),
+        },
+        "attack_tree": {
+            "OpenAI API": lambda: get_attack_tree(_oai, _model, prompt),
+            "Google AI API": lambda: get_attack_tree_google(_goo, _model, prompt),
+            "Mistral API": lambda: get_attack_tree_mistral(_mis, _model, prompt),
+            "Anthropic API": lambda: get_attack_tree_anthropic(_ant, _model, prompt),
+            "LM Studio Server": lambda: get_attack_tree_lm_studio(_lm_ep, _model, prompt, _lm_key),
+            "Groq API": lambda: get_attack_tree_groq(_gro, _model, prompt),
+            "DeepSeek API": lambda: get_attack_tree_deepseek(_dee, _model, prompt),
+        },
+        "mitigations": {
+            "OpenAI API": lambda: get_mitigations(_oai, _model, prompt),
+            "Google AI API": lambda: get_mitigations_google(_goo, _model, prompt),
+            "Mistral API": lambda: get_mitigations_mistral(_mis, _model, prompt),
+            "Anthropic API": lambda: get_mitigations_anthropic(_ant, _model, prompt),
+            "LM Studio Server": lambda: get_mitigations_lm_studio(_lm_ep, _model, prompt, _lm_key),
+            "Groq API": lambda: get_mitigations_groq(_gro, _model, prompt),
+            "DeepSeek API": lambda: get_mitigations_deepseek(_dee, _model, prompt),
+        },
+        "dread": {
+            "OpenAI API": lambda: get_dread_assessment(_oai, _model, prompt),
+            "Google AI API": lambda: get_dread_assessment_google(_goo, _model, prompt),
+            "Mistral API": lambda: get_dread_assessment_mistral(_mis, _model, prompt),
+            "Anthropic API": lambda: get_dread_assessment_anthropic(_ant, _model, prompt),
+            "LM Studio Server": lambda: get_dread_assessment_lm_studio(
+                _lm_ep, _model, prompt, _lm_key
+            ),
+            "Groq API": lambda: get_dread_assessment_groq(_gro, _model, prompt),
+            "DeepSeek API": lambda: get_dread_assessment_deepseek(_dee, _model, prompt),
+        },
+        "test_cases": {
+            "OpenAI API": lambda: get_test_cases(_oai, _model, prompt),
+            "Google AI API": lambda: get_test_cases_google(_goo, _model, prompt),
+            "Mistral API": lambda: get_test_cases_mistral(_mis, _model, prompt),
+            "Anthropic API": lambda: get_test_cases_anthropic(_ant, _model, prompt),
+            "LM Studio Server": lambda: get_test_cases_lm_studio(_lm_ep, _model, prompt, _lm_key),
+            "Groq API": lambda: get_test_cases_groq(_gro, _model, prompt),
+            "DeepSeek API": lambda: get_test_cases_deepseek(_dee, _model, prompt),
+        },
+    }
+    _fn = (_table.get(kind) or {}).get(_provider)
+    if _fn is None:
+        raise RuntimeError(f"当前提供商（{_provider}）不支持「{kind}」生成")
+    return _fn()
+
+
+def _run_full_pipeline(project: str, description: str) -> None:
+    """一键生成全套产物并归档到指定项目。"""
+    _desc = (description or "").strip()
+    if not _desc:
+        st.warning("请先填写并保存应用描述。")
+        return
+    _provider = st.session_state.get("model_provider", "OpenAI API")
+    _skey = _KEY_BY_PROVIDER.get(_provider)
+    if _skey and not st.session_state.get(_skey):
+        st.warning("请先在「系统配置」中填写该提供商的 API Key。")
+        return
+
+    _app_type = st.session_state.get("app_type", "Web application")
+    _auth = st.session_state.get("authentication", [])
+    _facing = st.session_state.get("internet_facing", "")
+    _sens = st.session_state.get("sensitive_data", "")
+    _is_genai = _app_type in ("Generative AI application", "Agentic AI application")
+    _is_agentic = _app_type == "Agentic AI application"
+    _dfd = st.session_state.get("confirmed_dfd")
+
+    st.session_state["project_name"] = project
+    st.session_state["app_input"] = _desc
+    st.session_state["app_desc"] = _desc
+
+    _steps = ["威胁模型", "数据流图", "攻击树", "缓解措施", "DREAD 风险评估", "测试用例"]
+    _bar = st.progress(0.0, text="准备中…")
+    _log = st.container()
+    _tm_md = ""
+
+    for _i, _label in enumerate(_steps, 1):
+        _bar.progress((_i - 1) / len(_steps), text=f"正在生成：{_label}")
+        if _label in ("缓解措施", "DREAD 风险评估", "测试用例") and not _tm_md:
+            with _log:
+                st.markdown(f"- ⏭️ {_label}（跳过：威胁模型未生成成功）")
+            continue
+        try:
+            if _label == "威胁模型":
+                _prompt = create_threat_model_prompt(
+                    _app_type, _auth, _facing, _sens, _desc, confirmed_dfd=_dfd
+                )
+                _out = _run_model("threat_model", _prompt)
+                _tm = _out.get("threat_model", [])
+                _sug = _out.get("improvement_suggestions", [])
+                _tm_md = json_to_markdown(_tm, _sug)
+                st.session_state["threat_model"] = _tm
+                st.session_state["improvement_suggestions"] = _sug
+                st.session_state["threat_model_markdown"] = _tm_md
+                _archive(
+                    "threat_model",
+                    _tm_md,
+                    {"threat_model": _tm, "improvement_suggestions": _sug},
+                    project=project,
+                    description=_desc,
+                )
+            elif _label == "数据流图":
+                _prompt = create_dfd_prompt(_app_type, _auth, _facing, _sens, _desc)
+                _mermaid = _run_model("dfd", _prompt)
+                st.session_state["dfd_mermaid"] = _mermaid
+                _archive(
+                    "dfd", f"```mermaid\n{_mermaid}\n```", project=project, description=_desc
+                )
+            elif _label == "攻击树":
+                _prompt = create_attack_tree_prompt(
+                    _app_type, _auth, _facing, _sens, _desc, confirmed_dfd=_dfd
+                )
+                _mermaid = _run_model("attack_tree", _prompt)
+                _archive(
+                    "attack_tree",
+                    f"```mermaid\n{_mermaid}\n```",
+                    project=project,
+                    description=_desc,
+                )
+            elif _label == "缓解措施":
+                _prompt = create_mitigations_prompt(
+                    _tm_md, is_genai=_is_genai, is_agentic=_is_agentic
+                )
+                _archive(
+                    "mitigations",
+                    _run_model("mitigations", _prompt),
+                    project=project,
+                    description=_desc,
+                )
+            elif _label == "DREAD 风险评估":
+                _prompt = create_dread_assessment_prompt(
+                    _tm_md, is_genai=_is_genai, is_agentic=_is_agentic
+                )
+                _assessment = _run_model("dread", _prompt)
+                st.session_state["dread_assessment"] = _assessment
+                _archive(
+                    "dread",
+                    dread_json_to_markdown(_assessment),
+                    _assessment,
+                    project=project,
+                    description=_desc,
+                )
+            elif _label == "测试用例":
+                _prompt = create_test_cases_prompt(
+                    _tm_md, is_genai=_is_genai, is_agentic=_is_agentic
+                )
+                _archive(
+                    "test_cases",
+                    _run_model("test_cases", _prompt),
+                    project=project,
+                    description=_desc,
+                )
+            with _log:
+                st.markdown(f"- ✅ {_label}")
+        except Exception as _e:
+            with _log:
+                st.markdown(f"- ⚠️ {_label} 失败：{_e}")
+        _bar.progress(_i / len(_steps), text=f"{_label} 完成")
+    _bar.progress(1.0, text="全流程完成")
+    st.success("全流程生成完成，结果已归档到本项目。")
+    st.rerun()
+
+
+def _page_projects() -> None:
+    """项目工作区：项目概览、产物、威胁台账、风险看板、一键全流程。"""
+    sync_projects_from_reports()
+    _projects = list_projects()
+    if not _projects:
+        st.info("还没有项目。到「威胁模型」页填写应用描述并生成一次，系统会自动创建项目。")
+        return
+
+    _sel = st.selectbox("选择项目", [p["name"] for p in _projects], key="ws_project")
+    _proj = next((p for p in _projects if p["name"] == _sel), None)
+    if not _proj:
+        return
+    backfill_project(_sel)
+
+    _stats = threat_stats(_sel)
+    _m1, _m2, _m3, _m4 = st.columns(4)
+    _m1.metric("产物数量", _proj.get("report_count", 0))
+    _m2.metric("威胁总数", _stats["total"])
+    _m3.metric("待处理", _stats["by_status"].get("待处理", 0))
+    _m4.metric("已修复", _stats["by_status"].get("已修复", 0))
+
+    _tab_overview, _tab_register, _tab_board = st.tabs(["项目概览", "威胁台账", "风险看板"])
+
+    with _tab_overview:
+        _desc = st.text_area(
+            "应用描述（用于分析与生成）",
+            value=_proj.get("description") or "",
+            height=160,
+            key=f"ws_desc_{_sel}",
+        )
+        _c1, _c2 = st.columns([1.2, 3])
+        with _c1:
+            if st.button("保存描述", key="ws_save_desc", use_container_width=True):
+                update_project_description(_sel, _desc)
+                st.session_state["app_input"] = _desc
+                st.session_state["app_desc"] = _desc
+                st.session_state["project_name"] = _sel
+                st.success("已保存，并同步为当前分析输入。")
+        with _c2:
+            st.caption("保存后，「威胁模型」页与一键全流程都会使用这段描述。")
+        if st.button("一键全流程生成", type="primary", key="ws_pipeline"):
+            _desc_effective = (_desc or _proj.get("description") or st.session_state.get("app_input") or "").strip()
+            _run_full_pipeline(_sel, _desc_effective)
+        st.markdown("#### 产物")
+        _reports = list_reports(project=_sel, limit=100)
+        if not _reports:
+            st.caption("暂无产物。点击上方按钮一键生成全套。")
+        for _r in _reports:
+            with st.expander(
+                f"{KIND_LABELS.get(_r['kind'], _r['kind'])} · {_r['created_at']} · {_r['model']}"
+            ):
+                st.markdown(_r["content_md"])
+                st.download_button(
+                    "下载 Markdown",
+                    data=_r["content_md"],
+                    file_name=f"report-{_r['id']}.md",
+                    mime="text/markdown",
+                    key=f"ws_md_{_r['id']}",
+                )
+
+    with _tab_register:
+        _threats = list_threats(project=_sel)
+        if not _threats:
+            st.info("暂无威胁条目。生成一次威胁模型后会自动写入台账。")
+        else:
+            _f1, _f2 = st.columns([2, 2])
+            with _f1:
+                _status_filter = st.multiselect(
+                    "状态筛选",
+                    THREAT_STATUSES,
+                    key=f"ws_status_{_sel}",
+                    placeholder="选择状态…",
+                )
+            with _f2:
+                _kw = st.text_input(
+                    "搜索", key=f"ws_kw_{_sel}", placeholder="场景 / 类型 / 负责人"
+                )
+            _rows = [
+                t
+                for t in _threats
+                if (not _status_filter or t["status"] in _status_filter)
+                and (
+                    not _kw
+                    or _kw.lower()
+                    in ((t["scenario"] or "") + (t["threat_type"] or "") + (t["owner"] or "")).lower()
+                )
+            ]
+            st.caption("每条威胁可单独设置状态、负责人与备注，改完点下方按钮保存。")
+            for t in _rows:
+                with st.container(border=True):
+                    _rc1, _rc2 = st.columns([3, 2], vertical_alignment="center")
+                    with _rc1:
+                        _score = f"{float(t['risk_score']):.2f}" if t["risk_score"] is not None else "—"
+                        _tags = " · ".join(
+                            x for x in [t["owasp_llm"], t["owasp_asi"], t["mitre"]] if x
+                        )
+                        st.markdown(
+                            f"**#{t['id']} {t['threat_type']}** · 风险分 {_score}"
+                            f"  \n<span class='sg-rep-meta'>{t['scenario']}</span>"
+                            + (f"  \n<span class='sg-rep-meta'>{_tags}</span>" if _tags else ""),
+                            unsafe_allow_html=True,
+                        )
+                        if t["impact"]:
+                            st.caption(f"影响：{t['impact']}")
+                    with _rc2:
+                        _sc1, _sc2 = st.columns([1, 1])
+                        with _sc1:
+                            st.selectbox(
+                                "状态",
+                                THREAT_STATUSES,
+                                index=(
+                                    THREAT_STATUSES.index(t["status"])
+                                    if t["status"] in THREAT_STATUSES
+                                    else 0
+                                ),
+                                key=f"th_status_{t['id']}",
+                            )
+                        with _sc2:
+                            st.text_input(
+                                "负责人", value=t["owner"], key=f"th_owner_{t['id']}"
+                            )
+                        st.text_input("备注", value=t["note"], key=f"th_note_{t['id']}")
+            if st.button("保存台账变更", type="primary", key="ws_save_threats"):
+                _edits = [
+                    {
+                        "id": t["id"],
+                        "status": st.session_state.get(f"th_status_{t['id']}", t["status"]),
+                        "owner": st.session_state.get(f"th_owner_{t['id']}", t["owner"]),
+                        "note": st.session_state.get(f"th_note_{t['id']}", t["note"]),
+                    }
+                    for t in _rows
+                ]
+                _n = update_threats(_edits)
+                st.success(f"已保存 {_n} 条变更。")
+                st.rerun()
+
+    with _tab_board:
+        _by_type = dict(
+            sorted(_stats["by_type"].items(), key=lambda kv: -kv[1])
+        )
+        _by_status = {k: v for k, v in _stats["by_status"].items() if v}
+        _cc1, _cc2 = st.columns(2)
+        with _cc1:
+            st.markdown("#### STRIDE 分布")
+            if _by_type:
+                st.bar_chart({"数量": _by_type})
+            else:
+                st.caption("暂无数据")
+        with _cc2:
+            st.markdown("#### 台账状态分布")
+            if _by_status:
+                st.bar_chart({"数量": _by_status})
+            else:
+                st.caption("暂无数据")
+        st.markdown("#### 高风险 Top 10（按 DREAD 评分）")
+        _risky = sorted(
+            [t for t in list_threats(project=_sel) if t["risk_score"] is not None],
+            key=lambda t: -float(t["risk_score"]),
+        )[:10]
+        if _risky:
+            _lines = [
+                "| 风险分 | 类型 | 场景 | 状态 | 负责人 |",
+                "|---|---|---|---|---|",
+            ]
+            for t in _risky:
+                _scene = (t["scenario"] or "").replace("|", "\\|").replace("\n", " ")
+                _lines.append(
+                    f"| {float(t['risk_score']):.2f} | {t['threat_type']} | {_scene} |"
+                    f" {t['status']} | {t['owner'] or '—'} |"
+                )
+            st.markdown("\n".join(_lines))
+        else:
+            st.caption("生成一次 DREAD 风险评估后，风险分会自动回填到台账。")
+
+
 # ------------------ 页面路由（独立 URL） ------------------ #
 
 _PAGE_HEADERS = {
     "威胁模型": ("THREAT MODEL", "威胁模型"),
+    "项目工作区": ("PROJECTS", "项目工作区"),
     "攻击树": ("ATTACK TREE", "攻击树"),
     "数据流图": ("DATA FLOW DIAGRAM", "数据流图"),
     "缓解措施": ("MITIGATIONS", "缓解措施"),
@@ -3186,6 +3657,7 @@ _PAGE_HEADERS = {
 # 六个页面注册为独立路由：每页有自己的地址（可刷新 / 收藏 / 分享）
 _PAGE_PAGES = {
     "威胁模型": st.Page(_page_threat_model, title="威胁模型", url_path="threat-model", default=True),
+    "项目工作区": st.Page(_page_projects, title="项目工作区", url_path="projects"),
     "攻击树": st.Page(_page_attack_tree, title="攻击树", url_path="attack-tree"),
     "数据流图": st.Page(_page_data_flow, title="数据流图", url_path="data-flow-diagram"),
     "缓解措施": st.Page(_page_mitigations, title="缓解措施", url_path="mitigations"),
@@ -3199,6 +3671,7 @@ _pg = st.navigation(list(_PAGE_PAGES.values()), position="hidden")
 # 登录后跳转回进入前的深链目标
 _PATH_TO_TITLE = {
     "threat-model": "威胁模型",
+    "projects": "项目工作区",
     "attack-tree": "攻击树",
     "data-flow-diagram": "数据流图",
     "mitigations": "缓解措施",

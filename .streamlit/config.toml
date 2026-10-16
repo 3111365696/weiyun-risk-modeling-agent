@@ -4,6 +4,7 @@ base = "dark"
 # 主色：克制的紫罗兰，避免高饱和荧光紫
 primaryColor = "#7C6BD6"
 violetColor = "#7C6BD6"
+chartCategoricalColors = ["#7C6BD6", "#A99AF0", "#4E7DE8", "#30A46C", "#FFB224", "#F76B15", "#E5484D", "#5BA8A0"]
 violetBackgroundColor = "#2A2340"
 
 backgroundColor = "#14121B"

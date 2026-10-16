@@ -8,10 +8,14 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import io
 import json
 import os
 import sqlite3
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -154,6 +158,50 @@ def init_db() -> None:
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_reports_kind ON reports(kind)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_reports_project ON reports(project)")
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS projects (
+                name TEXT PRIMARY KEY,
+                description TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS threats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL DEFAULT '',
+                report_id INTEGER,
+                threat_type TEXT NOT NULL DEFAULT '',
+                scenario TEXT NOT NULL DEFAULT '',
+                impact TEXT NOT NULL DEFAULT '',
+                owasp_llm TEXT NOT NULL DEFAULT '',
+                owasp_asi TEXT NOT NULL DEFAULT '',
+                mitre TEXT NOT NULL DEFAULT '',
+                insider TEXT NOT NULL DEFAULT '',
+                risk_score REAL,
+                status TEXT NOT NULL DEFAULT '待处理',
+                owner TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                fingerprint TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_threats_project ON threats(project)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_threats_fp ON threats(project, fingerprint)")
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS drafts (
+                key TEXT PRIMARY KEY,
+                payload TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
 
 
 def save_report(
@@ -354,3 +402,340 @@ def export_zip(reports: list[dict]) -> bytes:
             json.dumps(manifest, ensure_ascii=False, indent=2),
         )
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# 项目工作区
+# ---------------------------------------------------------------------------
+
+THREAT_STATUSES = ["待处理", "已确认", "已修复", "已接受", "已忽略"]
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def upsert_project(name: str, description: str = "") -> None:
+    """新建项目或刷新更新时间；description 非空时覆盖。"""
+    if not name:
+        return
+    init_db()
+    now = _now()
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO projects(name, description, created_at, updated_at)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                description = CASE WHEN excluded.description != ''
+                                   THEN excluded.description ELSE projects.description END,
+                updated_at = excluded.updated_at
+            """,
+            (name, description or "", now, now),
+        )
+
+
+def update_project_description(name: str, description: str) -> None:
+    init_db()
+    with _conn() as c:
+        c.execute(
+            "UPDATE projects SET description = ?, updated_at = ? WHERE name = ?",
+            (description or "", _now(), name),
+        )
+
+
+def get_project(name: str) -> dict | None:
+    init_db()
+    with _conn() as c:
+        row = c.execute("SELECT * FROM projects WHERE name = ?", (name,)).fetchone()
+    return dict(row) if row else None
+
+
+def sync_projects_from_reports() -> None:
+    """把历史报告里出现过的项目补登记为正式项目。"""
+    init_db()
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT DISTINCT project FROM reports WHERE project != ''"
+        ).fetchall()
+        for r in rows:
+            c.execute(
+                """
+                INSERT INTO projects(name, description, created_at, updated_at)
+                VALUES(?, '', ?, ?)
+                ON CONFLICT(name) DO NOTHING
+                """,
+                (r["project"], _now(), _now()),
+            )
+
+
+def list_projects() -> list[dict]:
+    """项目列表（含报告数 / 威胁数 / 待处理数）。"""
+    init_db()
+    with _conn() as c:
+        rows = c.execute(
+            """
+            SELECT p.name, p.description, p.created_at, p.updated_at,
+                (SELECT COUNT(*) FROM reports r WHERE r.project = p.name) AS report_count,
+                (SELECT COUNT(*) FROM threats t WHERE t.project = p.name) AS threat_count,
+                (SELECT COUNT(*) FROM threats t WHERE t.project = p.name
+                   AND t.status = '待处理') AS open_count,
+                (SELECT MAX(created_at) FROM reports r WHERE r.project = p.name) AS last_report
+            FROM projects p
+            ORDER BY p.updated_at DESC, p.name
+            """
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# 威胁台账
+# ---------------------------------------------------------------------------
+
+
+def _threat_fingerprint(threat_type: str, scenario: str) -> str:
+    raw = f"{(threat_type or '').strip().lower()}|{(scenario or '').strip().lower()}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def add_threats(project: str, report_id: int | None, threats: list[dict]) -> int:
+    """写入威胁条目，按（类型+场景）指纹在项目内去重。返回新增数量。"""
+    if not project or not threats:
+        return 0
+    init_db()
+    inserted = 0
+    now = _now()
+    with _conn() as c:
+        for t in threats:
+            ttype = str(t.get("Threat Type") or t.get("threat_type") or "").strip()
+            scenario = str(t.get("Scenario") or t.get("scenario") or "").strip()
+            if not scenario:
+                continue
+            fp = _threat_fingerprint(ttype, scenario)
+            exists = c.execute(
+                "SELECT 1 FROM threats WHERE project = ? AND fingerprint = ?",
+                (project, fp),
+            ).fetchone()
+            if exists:
+                continue
+            c.execute(
+                """
+                INSERT INTO threats
+                    (project, report_id, threat_type, scenario, impact, owasp_llm, owasp_asi,
+                     mitre, insider, status, created_at, updated_at, fingerprint)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '待处理', ?, ?, ?)
+                """,
+                (
+                    project,
+                    report_id,
+                    ttype,
+                    scenario,
+                    str(t.get("Potential Impact") or t.get("impact") or "").strip(),
+                    str(t.get("OWASP_LLM") or "").strip(),
+                    str(t.get("OWASP_ASI") or "").strip(),
+                    str(t.get("MITRE_ATTACK") or t.get("MITRE") or "").strip(),
+                    str(t.get("INSIDER_CATEGORY") or "").strip(),
+                    now,
+                    now,
+                    fp,
+                ),
+            )
+            inserted += 1
+    return inserted
+
+
+def list_threats(
+    *, project: str | None = None, status: str | None = None, search: str | None = None
+) -> list[dict]:
+    init_db()
+    with _conn() as c:
+        rows = [dict(r) for r in c.execute("SELECT * FROM threats ORDER BY id").fetchall()]
+    if project:
+        rows = [r for r in rows if r["project"] == project]
+    if status:
+        rows = [r for r in rows if r["status"] == status]
+    if search:
+        kw = search.strip().lower()
+        rows = [
+            r
+            for r in rows
+            if kw in (r["scenario"] or "").lower()
+            or kw in (r["threat_type"] or "").lower()
+            or kw in (r["owner"] or "").lower()
+        ]
+    return rows
+
+
+def update_threats(edits: list[dict]) -> int:
+    """批量更新台账（status / owner / note）。"""
+    if not edits:
+        return 0
+    init_db()
+    now = _now()
+    n = 0
+    with _conn() as c:
+        for e in edits:
+            rid = int(e.get("id"))
+            c.execute(
+                """
+                UPDATE threats SET status = ?, owner = ?, note = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    str(e.get("status") or "待处理"),
+                    str(e.get("owner") or ""),
+                    str(e.get("note") or ""),
+                    now,
+                    rid,
+                ),
+            )
+            n += 1
+    return n
+
+
+def threat_stats(project: str) -> dict:
+    rows = list_threats(project=project)
+    by_status = {s: 0 for s in THREAT_STATUSES}
+    by_type: dict[str, int] = {}
+    for r in rows:
+        by_status[r["status"]] = by_status.get(r["status"], 0) + 1
+        by_type[r["threat_type"]] = by_type.get(r["threat_type"], 0) + 1
+    return {"total": len(rows), "by_status": by_status, "by_type": by_type}
+
+
+def apply_dread_scores(project: str, assessment: dict) -> int:
+    """把 DREAD 报告中的风险分回填到对应威胁（按场景文本匹配）。"""
+    items = (assessment or {}).get("Risk Assessment") or []
+    if not project or not isinstance(items, list):
+        return 0
+    init_db()
+    n = 0
+    with _conn() as c:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            scenario = str(item.get("Scenario") or "").strip()
+            if not scenario:
+                continue
+            try:
+                score = sum(
+                    float(item.get(k) or 0)
+                    for k in (
+                        "Damage Potential",
+                        "Reproducibility",
+                        "Exploitability",
+                        "Affected Users",
+                        "Discoverability",
+                    )
+                ) / 5.0
+            except (TypeError, ValueError):
+                continue
+            cur = c.execute(
+                "UPDATE threats SET risk_score = ?, updated_at = ? WHERE project = ? AND scenario = ?",
+                (round(score, 2), _now(), project, scenario),
+            )
+            n += cur.rowcount or 0
+    return n
+
+
+# ---------------------------------------------------------------------------
+# 草稿
+# ---------------------------------------------------------------------------
+
+
+def save_draft(key: str, payload: dict) -> None:
+    init_db()
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO drafts(key, payload, updated_at) VALUES(?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at
+            """,
+            (key, json.dumps(payload, ensure_ascii=False), _now()),
+        )
+
+
+def load_draft(key: str) -> dict | None:
+    if not key:
+        return None
+    init_db()
+    with _conn() as c:
+        row = c.execute("SELECT payload FROM drafts WHERE key = ?", (key,)).fetchone()
+    if not row:
+        return None
+    try:
+        return dict(json.loads(row["payload"]))
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 会话令牌（cookie 记忆登录）
+# ---------------------------------------------------------------------------
+
+SESSION_COOKIE = "wy_session"
+
+
+def _session_secret() -> bytes:
+    f = DATA_DIR / "web_session_secret"
+    if f.exists():
+        return f.read_bytes().strip()
+    _ensure_dir()
+    secret = os.urandom(32).hex().encode("utf-8")
+    f.write_bytes(secret)
+    try:
+        f.chmod(0o600)
+    except OSError:
+        pass
+    return secret
+
+
+def make_session_token(username: str, days: int = 7) -> str:
+    payload = json.dumps(
+        {"u": username, "exp": int(time.time()) + days * 86400},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    sig = hmac.new(_session_secret(), payload, hashlib.sha256).hexdigest()
+    b64 = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    return f"{b64}.{sig}"
+
+
+def verify_session_token(token: str | None) -> str | None:
+    if not token:
+        return None
+    try:
+        b64, sig = token.split(".", 1)
+        payload = base64.urlsafe_b64decode(b64 + "=" * (-len(b64) % 4))
+        expected = hmac.new(_session_secret(), payload, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        data = json.loads(payload)
+        if int(data.get("exp", 0)) < int(time.time()):
+            return None
+        return str(data.get("u") or "") or None
+    except Exception:
+        return None
+
+
+def backfill_project(project: str) -> int:
+    """把已有的威胁模型 / DREAD 报告回填到台账（幂等，重复调用不会重复写入）。
+
+    分两段处理：先补威胁条目，再用 DREAD 回填风险分（否则会匹配不到威胁）。
+    """
+    if not project:
+        return 0
+    added = 0
+    _reports = [r for r in list_reports(project=project, limit=1000) if r.get("content_json")]
+    _parsed = []
+    for r in _reports:
+        try:
+            _parsed.append((r, json.loads(r["content_json"])))
+        except Exception:
+            continue
+    for r, data in _parsed:
+        if r["kind"] == "threat_model":
+            added += add_threats(project, r["id"], list((data or {}).get("threat_model") or []))
+    for r, data in _parsed:
+        if r["kind"] == "dread":
+            apply_dread_scores(project, data or {})
+    return added
