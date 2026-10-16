@@ -46,6 +46,12 @@ api = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
 ]
+# 静态分析线索（SAST）：缺失时系统自动降级，不影响主流程
+scanners = [
+    "bandit>=1.7",
+    "detect-secrets>=1.5",
+    "semgrep>=1.90",
+]
 # Streamlit web-app deps (apps/web). Kept out of [project.dependencies] so the
 # published CLI wheel stays lean; a dependency-group is local/deploy-only and is
 # never shipped in the wheel. Streamlit Community Cloud, the Docker UI image
@@ -66,7 +72,7 @@ web = [
 [tool.uv]
 # `uv sync` (used by SCC, CI, and release) installs these groups by default, so
 # the web app has its deps in every environment without extra flags.
-default-groups = ["dev", "web", "api"]
+default-groups = ["dev", "web", "api", "scanners"]
 # Security floors for transitive deps not directly imported. Applied at lock
 # time and baked into uv.lock, which is the single source of truth for these
 # pins (the old requirements.txt duplication has been retired).

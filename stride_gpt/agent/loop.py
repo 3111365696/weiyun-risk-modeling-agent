@@ -113,6 +113,7 @@ def run_analysis(
     resume_findings: dict[str, SubsystemFinding] | None = None,
     on_checkpoint: Callable[[list[SubsystemFinding]], None] | None = None,
     planning_usage: TokenUsage | None = None,
+    seed_context: str | None = None,
 ) -> AnalysisReport:
     """Run a full agentic threat model analysis on a codebase.
 
@@ -145,6 +146,10 @@ def run_analysis(
             was built externally via ``create_analysis_plan(usage=...)``.
             Folded into the run's ``"planning"`` phase total so it isn't lost
             just because planning happened outside this call.
+        seed_context: Optional extra context appended to every subsystem's
+            initial user message — e.g. static-analysis leads (Semgrep/Bandit)
+            for the agent to verify. Kept short by the caller; the agent is
+            told these are candidates, not conclusions.
 
     Returns:
         Complete AnalysisReport.
@@ -280,6 +285,7 @@ def run_analysis(
                 loaded_refs=loaded_refs,
                 token_usage=sub_token_usage,
                 phase_usage=phase_usage,
+                seed_context=seed_context,
             )
             llm_calls += sub_counts["llm"]
             tool_calls += sub_counts["tool"]
@@ -825,6 +831,7 @@ def _analyze_subsystem(
     loaded_refs: set[str] | None = None,
     token_usage: TokenUsage | None = None,
     phase_usage: dict[str, TokenUsage] | None = None,
+    seed_context: str | None = None,
 ) -> SubsystemFinding:
     """Analyze a single subsystem using the agent loop.
 
@@ -840,7 +847,9 @@ Description: {subsystem_description}
 Key files to examine: {', '.join(key_files) if key_files else 'Discover relevant files using search_files and list_directory'}
 Focus areas: {', '.join(focus_areas) if focus_areas else 'All STRIDE categories'}
 
-Start by reading the key files. Use grep to find security-relevant patterns like authentication, authorization, input validation, SQL queries, file operations, secret handling, and network calls. Report each threat with report_threat as you find it, then call finish."""
+Start by reading the key files. Use grep to find security-relevant patterns like authentication, authorization, input validation, SQL queries, file operations, secret handling, and network calls. Report each threat with report_threat as you find it, then call finish.""" + (
+        f"\n\n{seed_context.strip()}" if seed_context else ""
+    )
 
     messages: list[dict] = [
         {"role": "system", "content": AGENT_SYSTEM_PROMPT},

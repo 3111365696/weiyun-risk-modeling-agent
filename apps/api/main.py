@@ -102,6 +102,7 @@ class CodeAuditRequest(BaseModel):
     architect_model: str | None = Field(default=None, description="覆盖 architect 模型")
     max_llm_calls: int = Field(default=60, ge=0, description="LLM 调用上限（0=不限）")
     max_tool_calls: int = Field(default=80, ge=0, description="工具调用上限（0=不限）")
+    enable_scanners: bool = Field(default=True, description="启用静态分析线索（SAST）")
     token: str | None = Field(default=None, description="私有仓库访问令牌")
 
 
@@ -490,6 +491,7 @@ def _start_job(
     architect_model: str | None,
     max_llm_calls: int,
     max_tool_calls: int,
+    enable_scanners: bool = True,
     zip_bytes: bytes | None = None,
     repo_url: str | None = None,
     token: str | None = None,
@@ -534,6 +536,7 @@ def _start_job(
                 "models": models,
                 "max_llm_calls": max_llm_calls,
                 "max_tool_calls": max_tool_calls,
+                "enable_scanners": enable_scanners,
                 "on_event": _event,
                 "cancel_check": _cancel_check,
             }
@@ -550,6 +553,7 @@ def _start_job(
                         "threats_inserted": result["threats_inserted"],
                         "threats_total": result["threats_total"],
                         "run_status": result["status"],
+                        "scanner_summary": result.get("scanner_summary") or {"total": 0},
                     },
                     summary=result["markdown"][:2000],
                 )
@@ -586,6 +590,7 @@ def api_code_audit(
         architect_model=body.architect_model,
         max_llm_calls=body.max_llm_calls,
         max_tool_calls=body.max_tool_calls,
+        enable_scanners=body.enable_scanners,
         repo_url=body.repo_url.strip(),
         token=body.token,
     )
@@ -601,6 +606,7 @@ def api_code_audit_upload(
     architect_model: str | None = Form(default=None),
     max_llm_calls: int = Form(default=60),
     max_tool_calls: int = Form(default=80),
+    enable_scanners: bool = Form(default=True),
     api_key_name: str = Depends(require_api_key),
 ) -> dict:
     _enforce_quota(api_key_name)
@@ -616,6 +622,7 @@ def api_code_audit_upload(
         architect_model=architect_model,
         max_llm_calls=max_llm_calls,
         max_tool_calls=max_tool_calls,
+        enable_scanners=enable_scanners,
         zip_bytes=data,
     )
     return {"ok": True, "job_id": job_id, "status": "running"}

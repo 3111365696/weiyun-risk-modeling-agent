@@ -22,6 +22,7 @@ from stride_gpt.agent.loop import run_analysis
 from stride_gpt.agent.report import render_json, render_markdown, render_sarif
 from stride_gpt.core.schemas import ModelPair
 
+from . import scanners as _scanners
 from . import store
 from .generation import build_llm_config, resolve_model_settings
 
@@ -261,8 +262,12 @@ def run_agentic(
     max_tool_calls: int = 0,
     on_event=None,
     cancel_check=None,
+    seed_context: str | None = None,
 ):
-    """执行一次 agentic 分析，返回 AnalysisReport。"""
+    """执行一次 agentic 分析，返回 AnalysisReport。
+
+    ``seed_context`` 会附加到每个子系统的初始提示词（如静态分析线索）。
+    """
     progress = _EventProgress(on_event=on_event, cancel_check=cancel_check)
     return run_analysis(
         models,
@@ -271,12 +276,38 @@ def run_agentic(
         max_tool_calls=max_tool_calls,
         auto_approve=True,
         progress=progress,
+        seed_context=seed_context,
     )
 
 
-def archive_report(report, *, project: str, description: str = "") -> dict:
-    """把 agentic 报告归档为代码审计报告，并把带证据的威胁写入台账。"""
+def archive_report(
+    report, *, project: str, description: str = "", leads: list | None = None
+) -> dict:
+    """把 agentic 报告归档为代码审计报告，并把带证据的威胁写入台账。
+
+    ``leads`` 为静态分析线索（scanners.Lead），会附在报告末尾并写入元数据。
+    """
     markdown = render_markdown(report)
+    leads = leads or []
+    if leads:
+        report.metadata["scanner_leads"] = _scanners.summarize_for_report(leads)
+        lines = [
+            "",
+            "## 附：静态分析线索（工具原始输出）",
+            "",
+            "> 以下为扫描工具直接给出的候选线索，未经 agent 逐条核实；"
+            "已确认的威胁见正文与威胁台账。",
+            "",
+            "| 严重度 | 位置 | 工具/规则 | 说明 |",
+            "|---|---|---|---|",
+        ]
+        for lead in leads[:60]:
+            loc = f"`{lead.path}:{lead.line}`" if lead.line else f"`{lead.path}`"
+            message = lead.message.replace("|", "\\|").replace("\n", " ")[:120]
+            lines.append(
+                f"| {lead.severity} | {loc} | {lead.tool}/{lead.rule} | {message} |"
+            )
+        markdown = markdown.rstrip() + "\n" + "\n".join(lines) + "\n"
     data = render_json(report)
     sarif = render_sarif(report)
     provider = report.metadata.get("worker_model", "")
@@ -306,11 +337,42 @@ def archive_report(report, *, project: str, description: str = "") -> dict:
         "threats_inserted": inserted,
         "threats_total": len(threats),
         "status": report.metadata.get("run_summary", {}).get("status", "completed"),
+        "scanner_summary": _scanners.summarize_for_report(leads) if leads else {"total": 0},
     }
 
 
 def cleanup_workspace(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
+
+
+def _collect_leads(root: Path, *, enabled: bool, on_event, cancel_check):
+    """运行静态分析扫描器（失败/未安装都不影响主流程）。"""
+    if not enabled:
+        return []
+    if cancel_check and cancel_check():
+        raise AgenticCancelledError("任务已取消")
+    if on_event:
+        on_event("scanner_start", {"root": str(root)})
+    try:
+        result = _scanners.run_scanners(root)
+    except Exception as exc:
+        if on_event:
+            on_event("scanner_error", {"error": f"{type(exc).__name__}: {exc}"})
+        return []
+    leads = result["leads"]
+    if on_event:
+        on_event(
+            "scanner_done",
+            {
+                "leads": len(leads),
+                "summary": _scanners.summarize_for_report(leads),
+                "tools": [
+                    {"name": info.name, "available": info.available, "leads": info.leads}
+                    for info in result["scanners"]
+                ],
+            },
+        )
+    return leads
 
 
 def audit_zip(
@@ -324,11 +386,13 @@ def audit_zip(
     on_event=None,
     cancel_check=None,
     keep_workspace: bool = False,
+    enable_scanners: bool = True,
 ) -> dict:
     """上传 ZIP → 解压 → 分析 → 归档 的完整流程。"""
     workspace = new_workspace("zip")
     try:
         root = extract_zip(zip_bytes, workspace)
+        leads = _collect_leads(root, enabled=enable_scanners, on_event=on_event, cancel_check=cancel_check)
         report = run_agentic(
             root,
             models=models,
@@ -336,8 +400,9 @@ def audit_zip(
             max_tool_calls=max_tool_calls,
             on_event=on_event,
             cancel_check=cancel_check,
+            seed_context=_scanners.leads_markdown(leads) if leads else None,
         )
-        return archive_report(report, project=project, description=description)
+        return archive_report(report, project=project, description=description, leads=leads)
     finally:
         if not keep_workspace:
             cleanup_workspace(workspace)
@@ -355,11 +420,13 @@ def audit_repo(
     on_event=None,
     cancel_check=None,
     keep_workspace: bool = False,
+    enable_scanners: bool = True,
 ) -> dict:
     """克隆仓库 → 分析 → 归档 的完整流程。"""
     workspace = new_workspace("repo")
     try:
         root = clone_repo(repo_url, workspace / "repo", token=token)
+        leads = _collect_leads(root, enabled=enable_scanners, on_event=on_event, cancel_check=cancel_check)
         report = run_agentic(
             root,
             models=models,
@@ -367,8 +434,9 @@ def audit_repo(
             max_tool_calls=max_tool_calls,
             on_event=on_event,
             cancel_check=cancel_check,
+            seed_context=_scanners.leads_markdown(leads) if leads else None,
         )
-        return archive_report(report, project=project, description=description)
+        return archive_report(report, project=project, description=description, leads=leads)
     finally:
         if not keep_workspace:
             cleanup_workspace(workspace)

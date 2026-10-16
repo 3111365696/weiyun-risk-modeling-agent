@@ -1,0 +1,111 @@
+rules:
+  # 内置规则包：跨语言优先用 pattern-regex，保证离线、零依赖、低误报。
+  # 可用 STRIDE_GPT_SEMGREP_CONFIG 指向公司规则（如 p/ci）覆盖本包。
+
+  - id: wy-hardcoded-secret
+    languages: [generic]
+    severity: ERROR
+    message: 疑似硬编码口令/密钥，应改为密钥管理服务或环境变量
+    patterns:
+      - pattern-regex: (?i)(password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*["'][^"'\s]{8,}["']
+
+  - id: wy-jwt-no-verify
+    languages: [generic]
+    severity: ERROR
+    message: JWT 校验被关闭（verify_signature=False），可伪造任意令牌
+    patterns:
+      - pattern-regex: verify_signature["']?\s*:\s*False
+
+  - id: wy-tls-verify-disabled
+    languages: [generic]
+    severity: WARNING
+    message: 关闭 TLS 证书校验（verify=False），易受中间人攻击
+    patterns:
+      - pattern-regex: (?i)verify\s*=\s*False
+
+  - id: wy-python-eval-exec
+    languages: [python]
+    severity: ERROR
+    message: 使用 eval/exec 执行动态字符串，存在代码注入风险
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+
+  - id: wy-subprocess-shell
+    languages: [python]
+    severity: ERROR
+    message: subprocess 使用 shell=True，参数拼接时存在命令注入风险
+    pattern: subprocess.$FN(..., shell=True, ...)
+
+  - id: wy-os-system
+    languages: [python]
+    severity: WARNING
+    message: 直接调用 os.system/os.popen，建议改用 subprocess 且避免 shell
+    pattern-either:
+      - pattern: os.system(...)
+      - pattern: os.popen(...)
+
+  - id: wy-unsafe-deserialize
+    languages: [python]
+    severity: ERROR
+    message: 反序列化不可信数据（pickle/marshal），可能导致远程代码执行
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+      - pattern: marshal.loads(...)
+
+  - id: wy-yaml-unsafe-load
+    languages: [python]
+    severity: WARNING
+    message: yaml.load 未指定 SafeLoader，可被恶意 YAML 触发对象构造
+    patterns:
+      - pattern: yaml.load($X)
+      - pattern-not: yaml.load($X, Loader=...)
+
+  - id: wy-sql-string-build
+    languages: [python]
+    severity: ERROR
+    message: SQL 语句由字符串拼接/格式化构造，存在注入风险
+    pattern-either:
+      - pattern: $CUR.execute(f"...")
+      - pattern: $CUR.execute(....format(...))
+      - pattern-regex: \.execute\([^)]*%\s*[(\w]
+
+  - id: wy-cors-wildcard
+    languages: [generic]
+    severity: WARNING
+    message: CORS 允许任意来源（"*"），可能被跨站读取数据
+    patterns:
+      - pattern-regex: (?i)(allow_origins|origins)\s*[:=]\s*\[\s*["']\*["']
+
+  - id: wy-flask-debug
+    languages: [python]
+    severity: WARNING
+    message: 以 debug=True 启动服务，调试器可能暴露并允许执行代码
+    pattern: $APP.run(..., debug=True, ...)
+
+  - id: wy-weak-hash
+    languages: [python]
+    severity: WARNING
+    message: 使用 MD5/SHA1 等弱哈希，不应用于口令或完整性校验
+    pattern-either:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+
+  - id: wy-js-eval-innerhtml
+    languages: [generic]
+    severity: WARNING
+    message: 动态执行或直接写入 HTML（eval / innerHTML / dangerouslySetInnerHTML），存在 XSS 风险
+    pattern-regex: (?i)(dangerouslySetInnerHTML|\.innerHTML\s*=|document\.write\(|\beval\()
+
+  - id: wy-go-shell-exec
+    languages: [generic]
+    severity: ERROR
+    message: 通过 shell 执行外部命令（sh -c），参数拼接时存在命令注入
+    pattern-regex: exec\.Command\(\s*["'](sh|bash)["']\s*,\s*["']-c["']
+
+  - id: wy-java-runtime-exec
+    languages: [java]
+    severity: ERROR
+    message: Runtime.exec 执行外部命令，参数拼接时存在命令注入
+    pattern: Runtime.getRuntime().exec(...)

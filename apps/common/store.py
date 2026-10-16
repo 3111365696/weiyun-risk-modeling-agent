@@ -51,6 +51,7 @@ PERSIST_KEYS = [
     "ui_language",
     "verify_threats",
     "monthly_budget",
+    "enable_scanners",
     *sorted(SENSITIVE_KEYS),
 ]
 

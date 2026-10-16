@@ -46,6 +46,7 @@ from common import agentic as _agentic
 from common import exporters as _exporters
 from common import generation as _generation
 from common import i18n as _i18n
+from common import scanners as _scanners
 from common import store
 from common import usage as _usage
 
@@ -4404,6 +4405,30 @@ def _page_code_audit() -> None:
                 "Caps control cost: subsystems that hit the cap get one final round.",
             )
         )
+        _scanner_probe = _scanners.probe()
+        _available_names = [s["name"] for s in _scanner_probe if s["available"]]
+        with st.expander(
+            _t("静态分析线索（SAST）", "Static-analysis leads (SAST)")
+            + f" · {' · '.join(_available_names) if _available_names else _t('无可用工具', 'none available')}",
+            expanded=False,
+        ):
+            st.caption(
+                _t(
+                    "先用本机扫描工具产出候选线索，再交给 agent 逐条核实（线索可能含误报）。",
+                    "Local scanners produce candidate leads first; the agent verifies them (leads may contain false positives).",
+                )
+            )
+            for _s in _scanner_probe:
+                st.markdown(
+                    f"{'✅' if _s['available'] else '➖'} **{_s['name']}** · {_s['hint']}"
+                    + (f"  \n<span class='sg-rep-meta'>{_s['install']}</span>" if _s["install"] else ""),
+                    unsafe_allow_html=True,
+                )
+            st.checkbox(
+                _t("启用静态分析线索", "Enable static-analysis leads"),
+                value=bool(st.session_state.get("enable_scanners", True)),
+                key="enable_scanners",
+            )
 
     _confirm = st.checkbox(
         _t(
@@ -4452,6 +4477,26 @@ def _page_code_audit() -> None:
                         f"`{payload.get('name')}` {str(payload.get('args', ''))[:80]}"
                         + (_t("（缓存）", " (cached)") if payload.get("cached") else "")
                     )
+                elif kind == "scanner_start":
+                    _line.markdown(_t("正在运行静态分析扫描器…", "Running static-analysis scanners…"))
+                elif kind == "scanner_done":
+                    _summary = payload.get("summary") or {}
+                    _by_tool = _summary.get("by_tool") or {}
+                    _events.append(
+                        "- "
+                        + _t("静态分析线索：", "Static-analysis leads: ")
+                        + f"{_summary.get('total', 0)}"
+                        + _t(" 条（", " (")
+                        + " · ".join(f"{k} {v}" for k, v in _by_tool.items())
+                        + "）"
+                    )
+                    _log.markdown("\n".join(_events[-8:]))
+                elif kind == "scanner_error":
+                    _events.append(
+                        "- " + _t("扫描器异常（已跳过）：", "Scanner error (skipped): ")
+                        + str(payload.get("error", ""))[:80]
+                    )
+                    _log.markdown("\n".join(_events[-8:]))
                 elif kind == "limit":
                     _events.append(
                         f"- {_t('达到上限', 'limit reached')}：{payload.get('kind')}"
@@ -4470,6 +4515,7 @@ def _page_code_audit() -> None:
                 "models": _models,
                 "max_llm_calls": int(_max_llm),
                 "max_tool_calls": int(_max_tool),
+                "enable_scanners": bool(st.session_state.get("enable_scanners", True)),
                 "on_event": _on_event,
             }
             with st.spinner(_t("正在分析代码库…", "Analyzing the codebase…")):
@@ -4486,6 +4532,14 @@ def _page_code_audit() -> None:
                 "代码审计",
                 f"{_project}（报告 #{_result['report_id']}）",
             )
+            _scan_summary = _result.get("scanner_summary") or {}
+            if _scan_summary.get("total"):
+                st.caption(
+                    _t("静态分析线索：", "Static-analysis leads: ")
+                    + f"{_scan_summary['total']}"
+                    + _t(" 条 · 按工具 ", " · by tool ")
+                    + " · ".join(f"{k} {v}" for k, v in (_scan_summary.get("by_tool") or {}).items())
+                )
             st.success(
                 _t("报告已归档：", "Report archived: ")
                 + f"#{_result['report_id']} · "

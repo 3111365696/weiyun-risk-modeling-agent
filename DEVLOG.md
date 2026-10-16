@@ -292,3 +292,31 @@ Python 看到函数内存在对 `_t` 的赋值就把它当作局部变量，于�
 - **端到端（模拟 LLM 走完整 agent 协议）**：ZIP → 规划 1 个子系统 → 分析产出 2 条带证据威胁 →
   归档 `code_analysis` + SARIF 2 条结果；HTTP 上传任务 202 → 轮询 done（report_id/威胁数）
 - 浏览器实测：`/code-audit` 页面渲染正常（来源选择/确认/按钮/无异常）
+
+## 增量记录（2026-10-17）：B 阶段 静态分析工具集成（SAST 线索）
+
+### 新增 `apps/common/scanners.py` + `semgrep-rules.yml`
+- 统一适配层：探测本机可用工具 → 运行 → 归一化为 `Lead{工具,规则,严重度,文件,行号,说明}`
+- 已支持：**semgrep**（15 条内置离线规则：硬编码密钥、JWT 校验关闭、TLS 校验关闭、eval/exec、
+  shell 注入、反序列化、yaml 不安全加载、SQL 拼接、CORS 通配、flask debug、弱哈希、JS XSS、Go/Java 命令执行）、
+  **bandit**、**detect-secrets**；**gitleaks / trivy** 检测到二进制即启用
+- 「可用则用、缺失降级」：工具没装不影响主流程；跨工具去重 + 严重度排序 + 条数上限
+- 可用 `STRIDE_GPT_SEMGREP_CONFIG` 指向公司规则（如 `p/ci`）
+
+### 注入 agent
+- `run_analysis(seed_context=...)` 新增参数：把线索（`leads_markdown`，上限 40k 字符/60 条）附到
+  每个子系统的初始提示词，明确标注「候选线索、可能误报，请核实并引用代码」
+- 代码审计流程：扫描 → `scanner_start/scanner_done` 进度事件 → 分析 → 报告末尾附「静态分析线索」表格
+- 报告元数据写入 `scanner_leads` 汇总（按工具/严重度）
+
+### 界面与接口
+- 代码审计页：扫描器可用性面板（含安装提示）+「启用静态分析线索」开关；运行日志显示线索统计
+- API：`enable_scanners` 字段（JSON 与 multipart 均支持）；任务结果带 `scanner_summary`
+
+### 依赖
+- 新增 `scanners` 依赖组（bandit / detect-secrets / semgrep）并加入默认组；缺失时自动降级
+
+### 验证
+- 新增 10 个扫描器测试（探测/内置规则命中/干净代码零命中/去重排序/提示词截断/规则包校验）
+- 端到端：含漏洞的 ZIP → 扫描得 10 条线索（semgrep 5 + bandit 5，高危 5）→ 注入 agent →
+  报告含线索附录 + 2 条带证据威胁入库
