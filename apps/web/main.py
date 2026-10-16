@@ -3707,12 +3707,16 @@ def _page_projects() -> None:
             ):
                 if _diff["added"]:
                     st.markdown(_t("**新增威胁**", "**New threats**"))
-                    for _t in _diff["added"]:
-                        st.markdown(f"- {_t.get('Threat Type', '')} · {_t.get('Scenario', '')}")
+                    for _threat in _diff["added"]:
+                        st.markdown(
+                            f"- {_threat.get('Threat Type', '')} · {_threat.get('Scenario', '')}"
+                        )
                 if _diff["removed"]:
                     st.markdown(_t("**已消失威胁**", "**Resolved threats**"))
-                    for _t in _diff["removed"]:
-                        st.markdown(f"- {_t.get('Threat Type', '')} · {_t.get('Scenario', '')}")
+                    for _threat in _diff["removed"]:
+                        st.markdown(
+                            f"- {_threat.get('Threat Type', '')} · {_threat.get('Scenario', '')}"
+                        )
                 if not _diff["added"] and not _diff["removed"]:
                     st.caption(_t("两次威胁模型完全一致。", "The two threat models are identical."))
         _desc = st.text_area(

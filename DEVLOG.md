@@ -216,3 +216,16 @@ uv run streamlit run apps/web/main.py     # 默认 http://localhost:8501
 - `ruff check apps/ tests/`：全绿
 - 浏览器实测：切到 English 后导航/页面/侧边栏/子标签/角色/按钮全英文，切回中文正常
 - API 实测：Word/PDF 下载（正确 magic 与文件名编码）、覆盖度、差异、调度 CRUD
+
+## 修复（2026-10-17）：项目工作区 UnboundLocalError
+
+**现象**：打开「项目工作区」页面直接报 `UnboundLocalError: cannot access local variable '_t' where it is not associated with a value`，页面无法渲染。
+
+**原因**：变更对比卡片的循环变量命名为 `_t`（`for _t in _diff["added"]`），而该函数内还有大量 i18n 调用 `_t(...)`。
+Python 看到函数内存在对 `_t` 的赋值就把它当作局部变量，于是前面的 `_t(...)` 调用在赋值前触发 UnboundLocalError。
+
+**修复**：循环变量改名为 `_threat`；并新增静态回归测试 `tests/test_web_static.py`，
+用 AST 扫描 `apps/web/main.py`，禁止任何函数内局部变量/循环变量遮蔽模块级助手
+（`_t` / `_i18n` / `_generation` / `_exporters` / `_kind_label` 等）。
+
+**验证**：859 → **861 passed**；浏览器逐页检查 9 个页面均无异常，差异卡片可展开显示新增/消失明细。
