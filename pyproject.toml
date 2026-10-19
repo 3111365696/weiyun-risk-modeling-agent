@@ -39,7 +39,7 @@ stride-gpt = "stride_gpt.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=8.4",
-    "ruff==0.17.0",
+    "ruff==0.17.1",
 ]
 # REST API 服务（apps/api）依赖
 api = [
